@@ -21,106 +21,144 @@ run in CI rather than by a convention.
 
 ## Run order
 
-Every step writes a JSON report next to its output. Do not proceed past a step
-whose report contains a non-zero violation count.
+**Correction (2026-08-05):** the command lines previously in this section did
+not match the scripts' actual `argparse` flags — they used `--task/--out-dir/
+--stem` where the scripts take `--arm/--out`, and invoked `evaluate.py` and
+`compare_models.py` with arguments those scripts do not accept. Anyone who
+pasted them got an immediate argparse error. The block below is generated
+against the real CLIs and is the authoritative version.
+
+On Kaggle, use `notebooks/kaggle_stage_a_data_prep.ipynb` (CPU) and
+`notebooks/kaggle_stage_b_phase_a_run.ipynb` (GPU) instead of running these by
+hand; they wrap exactly these commands.
+
+Every stage writes a JSON report next to its output. Do not proceed past a stage
+whose report shows a non-zero violation count.
 
 ### 0. Environment
 ```bash
-git checkout develop/publication-clean-benchmark
+git checkout main
 pip install -r requirements.txt
 export PYTHONPATH=src
+export MIMIC_IV_DATASET_PATH=/path/to/mimic-iv
+export MIMIC_IV_NOTE_DATASET_PATH=/path/to/mimic-iv-note
 ```
 
-### 1. Contract tests (before touching data)
+### 1. Contract tests, before touching data
 ```bash
 pytest tests/ -q
 ```
-Expected: all pass. `tests/test_episode_leakage.py` is the 5,000-episode
-support/query disjointness proof at K = 1, 3, 5, 10.
 
-### 2. Build the clean cohort
+### 2. Build the cohort
 ```bash
-python scripts/build_clean_cohort.py \
-    --task anxiety_vs_psych \
-    --out-dir data/clean \
-    --stem psych_mimic4 \
-    --seed 20260805
+python -m scripts.build_clean_cohort \
+    --out data/clean --source mimic4 --arm psych \
+    --age-min 18 --age-max 50 \
+    --max-notes-per-patient 8 --train-control-ratio 3
 ```
-`--task anxiety_vs_psych` is the **primary** experiment: anxiety versus other
-psychiatric illness. Re-run with `--task anxiety_vs_nonpsych --stem nonpsych_mimic4`
-to produce the **secondary** (easier) benchmark, which is what the archived
-pipeline measured.
+`--arm psych` is the primary experiment (anxiety vs other psychiatric illness);
+`--arm clean` produces the easier secondary benchmark.
+Writes `cohort_psych_mimic4.csv`, `patients_psych_mimic4.csv`, `audit_psych_mimic4.json`.
 
-### 3. Audit the cohort
+### 3. Index-time protocol
 ```bash
-python scripts/audit_cohort.py --cohort data/clean/psych_mimic4_notes.csv
+python -m scripts.apply_index_time \
+    --cohort   data/clean/cohort_psych_mimic4.csv \
+    --patients data/clean/patients_psych_mimic4.csv \
+    --policy at_or_before --source mimic4 \
+    --out data/clean/cohort_psych_mimic4idx.csv
 ```
-This is the table that goes in the paper's Data section. It must show
-`Text-derived filtering: NO` on every row and `0` for all three split overlaps.
+Fixes one index time per patient from structured tables and drops notes outside
+the admitted window. `at_or_before` = concurrent detection; `strictly_before` =
+prospective. Read `differential_patient_retention_pp` in the report before
+trusting anything downstream.
 
-### 4. Robustness arms (identical patients, blinded text)
+### 4. Audit
 ```bash
-python scripts/blind_cohort.py --cohort data/clean/psych_mimic4_notes.csv \
-    --level dx_meds --out data/clean/psych_mimic4_dxmeds_notes.csv
-python scripts/blind_cohort.py --cohort data/clean/psych_mimic4_notes.csv \
-    --level psych   --out data/clean/psych_mimic4_psych_notes.csv
-```
-The script refuses to write if the patient set, split assignment, or label
-vector changed. That refusal is what makes the robustness comparison paired.
-
-### 5. Tokenise
-```bash
-python scripts/tokenize_cohort.py --cohort data/clean/psych_mimic4_notes.csv \
-    --out-dir data/clean/pkl --stem psych_mimic4
+python -m scripts.audit_cohort --cohort data/clean/cohort_psych_mimic4idx.csv
 ```
 
-### 6. Freeze episode plans
+### 5. Tokenise, unblinded and blinded, from the same file
 ```bash
-for K in 1 3 5 10; do
-  python scripts/make_episode_plans.py --pkl-dir data/clean/pkl \
-      --stem psych_mimic4 --k $K --seed 42
-done
+python -m scripts.tokenize_cohort --cohort data/clean/cohort_psych_mimic4idx.csv \
+    --out data/clean/pkl --blind none
+python -m scripts.tokenize_cohort --cohort data/clean/cohort_psych_mimic4idx.csv \
+    --out data/clean/pkl --blind dx_meds
 ```
-Plans are frozen to disk **before** any model runs. Every model and every
-ablation then sees the identical episodes, which is the precondition for the
-paired DeLong test to be valid.
+Use `tokenize_cohort --blind`, not `blind_cohort.py`, for the robustness arms:
+the plan fingerprint requires both pkls to come from identical cohort rows in
+identical order. `blind_cohort.py` remains useful only for inspecting how many
+terms each class contained.
 
-### 7. Shallow baselines first
+The stem is derived from the filename, so `cohort_psych_mimic4idx.csv` gives
+stem `psych_mimic4idx`.
+
+### 6. Freeze episode plans and the leakage certificate
 ```bash
-python scripts/run_shallow_baselines.py --pkl-dir data/clean/pkl \
-    --plan-dir data/clean/plans --stem psych_mimic4
+python -m scripts.make_episode_plans \
+    --pkl-dir data/clean/pkl --stem psych_mimic4idx \
+    --out data/clean/plans --k 1 3 5 10 --q-query 5 \
+    --train-episodes 3000 --eval-repeats 3 \
+    --leakage-episodes 5000 --seed 42
 ```
-**Stop here and read the numbers.** If TF-IDF is at or above the neural models,
-that is the headline result and the paper changes shape. Do not run the full
-grid before looking.
 
-### 8. Train
+### 7. Shallow baselines — and stop to read them
 ```bash
-for CFG in protonet tcwpn_full; do
-  for K in 1 3 5 10; do
-    python scripts/train.py --config configs/$CFG.yaml --k $K --seed 42 \
-        --stem psych_mimic4
-  done
-done
+python -m scripts.run_shallow_baselines --stem psych_mimic4idx --k 5 \
+    --baseline tfidf_lr   --split test --pkl-dir data/clean/pkl --plan-dir data/clean/plans
+python -m scripts.run_shallow_baselines --stem psych_mimic4idx --k 5 \
+    --baseline bert_probe --split test --pkl-dir data/clean/pkl --plan-dir data/clean/plans
 ```
-One seed first. Expand to five seeds only after the K-sweep looks sane.
+If TF-IDF matches the neural models, that is the headline and the paper changes
+shape. Do not run the grid before looking.
 
-### 9. Ablations
+### 8. Train — one K, one seed first
+```bash
+python -m scripts.train --config configs/protonet.yaml   --k 5 --seed 42 --stem psych_mimic4idx
+python -m scripts.train --config configs/tcwpn_full.yaml --k 5 --seed 42 --stem psych_mimic4idx
+```
+Runs land in `results/psych_mimic4idx/<config-name>_k<K>_seed<seed>/`.
+
+### 9. Evaluate
+```bash
+python -m scripts.evaluate --run results/psych_mimic4idx/tcwpn_full_k5_seed42 \
+    --split test --bootstrap 2000
+python -m scripts.evaluate --run results/psych_mimic4idx/tcwpn_full_k5_seed42 \
+    --split test --blind dx_meds --bootstrap 2000
+```
+
+### 10. Compare
+```bash
+python -m scripts.compare_models table --results results/psych_mimic4idx --split test
+python -m scripts.compare_models pair \
+    --a results/psych_mimic4idx/protonet_k5_seed42/predictions_test.csv \
+    --b results/psych_mimic4idx/tcwpn_full_k5_seed42/predictions_test.csv
+```
+
+### 11. Only then: ablations and extra seeds
 ```bash
 for CFG in protonet protonet_temp temporal_only pcw_only temporal_pcw tcwpn_full; do
-  python scripts/train.py --config configs/$CFG.yaml --k 5 --seed 42 --stem psych_mimic4
+  python -m scripts.train --config configs/$CFG.yaml --k 5 --seed 42 --stem psych_mimic4idx
 done
 ```
 
-### 10. Evaluate and compare
-```bash
-python scripts/evaluate.py --stem psych_mimic4 --k 5 --split test
-python scripts/compare_models.py --results results/psych_mimic4 --k 5
-```
-`compare_models.py` runs the paired DeLong test over patient-level score
-vectors. Report the p-value it produces, whichever direction it points.
-
 ---
+
+## Two task definitions, named separately
+
+The index policy decides which task the paper is reporting. Use the right words:
+
+| policy | task | what the abstract may claim |
+|---|---|---|
+| `at_or_before` | concurrent detection | identifies anxiety presentations from the record up to and including the index admission |
+| `strictly_before` | prospective detection | anticipates an anxiety diagnosis from the prior record |
+| `none` | retrospective association | nothing predictive; kept only to compare against the archived pipeline |
+
+The temporal weight uses `days_before_index` under any policy. `apply_index_time.py`
+writes that value into the `days_before_patient_last_note` column because that is
+the key `tokenize_cohort.py` reads; the substitution is recorded in the stage's
+JSON report. To make it explicit in code instead, add a `--temporal-field`
+argument to `tokenize_cohort.py` and point it at `days_before_index`.
 
 ## Naming change you must carry into the paper
 

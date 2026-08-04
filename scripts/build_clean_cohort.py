@@ -47,6 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from tcwpn import cohort as C            # noqa: E402
 from tcwpn import splits as S            # noqa: E402
+from tcwpn.io_paths import resolve, MIMIC4, MIMIC3   # noqa: E402
 
 MIN_NOTE_CHARS = 250
 
@@ -55,36 +56,26 @@ MIN_NOTE_CHARS = 250
 # LOADERS
 # =============================================================================
 def load_mimic4(base, note_base):
-    base, note_base = Path(base), Path(note_base)
-    patients = pd.read_csv(base / "hosp" / "patients.csv.gz",
+    patients = pd.read_csv(resolve(base, *MIMIC4["patients"]),
                            usecols=["subject_id", "gender", "anchor_age"])
     diagnoses = pd.read_csv(
-        base / "hosp" / "diagnoses_icd.csv.gz",
+        resolve(base, *MIMIC4["diagnoses"]),
         usecols=["subject_id", "hadm_id", "seq_num", "icd_code", "icd_version"],
     )
-    return patients, diagnoses, note_base / "note" / "discharge.csv.gz"
+    return patients, diagnoses, resolve(note_base, *MIMIC4["discharge"])
 
 
 def load_mimic3(base):
-    base = Path(base)
-
-    def pick(*names):
-        for n in names:
-            if (base / n).exists():
-                return base / n
-        raise FileNotFoundError(f"none of {names} found in {base}")
-
-    patients = pd.read_csv(pick("PATIENTS.csv.gz", "patients.csv.gz"),
+    patients = pd.read_csv(resolve(base, *MIMIC3["patients"]),
                            usecols=["SUBJECT_ID", "GENDER", "DOB"])
-    admissions = pd.read_csv(pick("ADMISSIONS.csv.gz", "admissions.csv.gz"),
+    admissions = pd.read_csv(resolve(base, *MIMIC3["admissions"]),
                              usecols=["SUBJECT_ID", "HADM_ID", "ADMITTIME"])
-    diagnoses = pd.read_csv(pick("DIAGNOSES_ICD.csv.gz", "diagnoses_icd.csv.gz"),
+    diagnoses = pd.read_csv(resolve(base, *MIMIC3["diagnoses"]),
                             usecols=["SUBJECT_ID", "HADM_ID", "SEQ_NUM", "ICD9_CODE"])
     diagnoses.columns = [c.lower() for c in diagnoses.columns]
     diagnoses = diagnoses.rename(columns={"icd9_code": "icd_code"})
     diagnoses["icd_version"] = 9
-    return patients, admissions, diagnoses, pick("NOTEEVENTS.csv.gz",
-                                                 "noteevents.csv.gz")
+    return patients, admissions, diagnoses, resolve(base, *MIMIC3["noteevents"])
 
 
 def stream_mimic4_notes(path, subject_ids, chunksize=100_000):
