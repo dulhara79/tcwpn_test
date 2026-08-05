@@ -1,0 +1,93 @@
+{
+  "created_utc": "2026-08-04T23:35:17.463665+00:00",
+  "args": {
+    "out": "/kaggle/working/data/clean",
+    "source": "mimic4",
+    "arm": "psych",
+    "age_min": 18,
+    "age_max": 50,
+    "anxiety_seq_num": null,
+    "max_notes_per_patient": 8,
+    "train_control_ratio": 3.0,
+    "split_salt": "tcwpn-clean-v1",
+    "mimic4_path": "/kaggle/input/datasets",
+    "mimic4_note_path": "/kaggle/input/datasets",
+    "mimic3_path": "/kaggle/input/datasets",
+    "mimic3_categories": [
+      "Discharge summary"
+    ]
+  },
+  "arm_counts_all": {
+    "clean_control": 43764,
+    "case": 16282,
+    "psych_control": 13725,
+    "excluded": 13119
+  },
+  "train_control_ratio_applied": 3.0,
+  "patients_per_split": {
+    "0": {
+      "test": 2090,
+      "train": 9627,
+      "val": 2008
+    },
+    "1": {
+      "test": 2452,
+      "train": 11394,
+      "val": 2436
+    }
+  },
+  "n_notes_raw": 52569,
+  "length_filter": {
+    "min_chars": 250,
+    "removed_case": 0,
+    "removed_control": 0,
+    "removed_case_pct": 0.0,
+    "removed_control_pct": 0.0
+  },
+  "cross_split_duplicate_text_hashes": 0,
+  "within_patient_duplicate_notes_dropped": 0,
+  "split_overlaps": {
+    "train_val": 0,
+    "train_test": 0,
+    "val_test": 0
+  },
+  "cross_split_text_hashes_remaining": 0,
+  "split_summary": [
+    {
+      "split": "train",
+      "patients": 12669,
+      "case_patients": 7200,
+      "control_patients": 5469,
+      "patient_prevalence": 0.5683,
+      "notes": 29899,
+      "case_notes": 18956,
+      "control_notes": 10943,
+      "note_prevalence": 0.634,
+      "notes_per_patient": 2.36
+    },
+    {
+      "split": "val",
+      "patients": 2761,
+      "case_patients": 1560,
+      "control_patients": 1201,
+      "patient_prevalence": 0.565,
+      "notes": 6402,
+      "case_notes": 4027,
+      "control_notes": 2375,
+      "note_prevalence": 0.629,
+      "notes_per_patient": 2.32
+    },
+    {
+      "split": "test",
+      "patients": 2805,
+      "case_patients": 1598,
+      "control_patients": 1207,
+      "patient_prevalence": 0.5697,
+      "notes": 6681,
+      "case_notes": 4285,
+      "control_notes": 2396,
+      "note_prevalence": 0.6414,
+      "notes_per_patient": 2.38
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "run_name": "protonet_k5_seed42",
+  "config": {
+    "name": "protonet",
+    "description": "Standard ProtoNet. No temporal weight, no consistency weight, fixed temperature.\n",
+    "model": {
+      "preset": "protonet",
+      "encoder_name": "emilyalsentzer/Bio_ClinicalBERT",
+      "projection_dim": 256,
+      "freeze_bert": false,
+      "init_temperature": 10.0,
+      "init_lambda": 0.5,
+      "init_beta": 2.0,
+      "consistency_passes": 1
+    },
+    "optim": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.001,
+      "weight_decay": 0.01,
+      "warmup_frac": 0.1,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "amp": true,
+      "eval_every": 250,
+      "val_episodes": 60
+    },
+    "threshold_objective": "f1"
+  },
+  "k_shot": 5,
+  "seed": 42,
+  "stem": "psych_mimic4idx",
+  "best_val_auroc_quick": 0.5521722222222222,
+  "best_step": 500,
+  "locked_threshold": 0.49708521366119385,
+  "val_plan_meta": {
+    "kind": "eval",
+    "split": "val",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 801,
+    "n_repeats": 3,
+    "seed": 1047,
+    "store_fingerprint": "57606f017e267766"
+  },
+  "train_plan_meta": {
+    "kind": "train",
+    "split": "train",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 3000,
+    "seed": 47,
+    "store_fingerprint": "81f23d8f6020e0f2"
+  },
+  "history": [
+    {
+      "step": 250,
+      "val_auroc": 0.5384333333333333,
+      "loss": 0.7206291556358337
+    },
+    {
+      "step": 500,
+      "val_auroc": 0.5521722222222222,
+      "loss": 0.7191411256790161
+    },
+    {
+      "step": 750,
+      "val_auroc": 0.5277722222222222,
+      "loss": 0.7230278849601746
+    },
+    {
+      "step": 1000,
+      "val_auroc": 0.5463555555555555,
+      "loss": 0.7035861015319824
+    },
+    {
+      "step": 1250,
+      "val_auroc": 0.5434055555555557,
+      "loss": 0.7140572667121887
+    },
+    {
+      "step": 1500,
+      "val_auroc": 0.5396555555555556,
+      "loss": 0.7134529948234558
+    },
+    {
+      "step": 1750,
+      "val_auroc": 0.5483555555555556,
+      "loss": 0.6782600283622742
+    },
+    {
+      "step": 2000,
+      "val_auroc": 0.5498777777777777,
+      "loss": 0.7027086019515991
+    },
+    {
+      "step": 2250,
+      "val_auroc": 0.5489999999999999,
+      "loss": 0.7111505270004272
+    },
+    {
+      "step": 2500,
+      "val_auroc": 0.5488333333333333,
+      "loss": 0.6850875616073608
+    },
+    {
+      "step": 2750,
+      "val_auroc": 0.5495611111111112,
+      "loss": 0.6491923332214355
+    },
+    {
+      "step": 3000,
+      "val_auroc": 0.5495222222222221,
+      "loss": 0.7061139345169067
+    }
+  ],
+  "device": "cuda",
+  "minutes": 40.3
+}

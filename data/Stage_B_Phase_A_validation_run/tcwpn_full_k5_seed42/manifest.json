@@ -1,0 +1,118 @@
+{
+  "run_name": "tcwpn_full_k5_seed42",
+  "config": {
+    "name": "tcwpn_full",
+    "description": "Full TC-WPN as reported in the paper: w^T + w^C + tau + auxiliary CE head.\n",
+    "model": {
+      "preset": "tcwpn_full",
+      "encoder_name": "emilyalsentzer/Bio_ClinicalBERT",
+      "projection_dim": 256,
+      "freeze_bert": false,
+      "init_temperature": 10.0,
+      "init_lambda": 0.5,
+      "init_beta": 2.0,
+      "consistency_passes": 1
+    },
+    "optim": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.001,
+      "weight_decay": 0.01,
+      "warmup_frac": 0.1,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "amp": true,
+      "eval_every": 250,
+      "val_episodes": 60
+    },
+    "threshold_objective": "f1"
+  },
+  "k_shot": 5,
+  "seed": 42,
+  "stem": "psych_mimic4idx",
+  "best_val_auroc_quick": 0.7560444444444445,
+  "best_step": 2500,
+  "locked_threshold": 0.28335163990656537,
+  "val_plan_meta": {
+    "kind": "eval",
+    "split": "val",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 801,
+    "n_repeats": 3,
+    "seed": 1047,
+    "store_fingerprint": "57606f017e267766"
+  },
+  "train_plan_meta": {
+    "kind": "train",
+    "split": "train",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 3000,
+    "seed": 47,
+    "store_fingerprint": "81f23d8f6020e0f2"
+  },
+  "history": [
+    {
+      "step": 250,
+      "val_auroc": 0.5446444444444445,
+      "loss": 0.9139657020568848
+    },
+    {
+      "step": 500,
+      "val_auroc": 0.5412666666666667,
+      "loss": 0.9149856567382812
+    },
+    {
+      "step": 750,
+      "val_auroc": 0.7109111111111113,
+      "loss": 0.8545940518379211
+    },
+    {
+      "step": 1000,
+      "val_auroc": 0.7445000000000002,
+      "loss": 0.812113881111145
+    },
+    {
+      "step": 1250,
+      "val_auroc": 0.7476222222222223,
+      "loss": 0.64801025390625
+    },
+    {
+      "step": 1500,
+      "val_auroc": 0.7477,
+      "loss": 0.9022423028945923
+    },
+    {
+      "step": 1750,
+      "val_auroc": 0.7536666666666665,
+      "loss": 0.5618566870689392
+    },
+    {
+      "step": 2000,
+      "val_auroc": 0.7523666666666666,
+      "loss": 0.7876219749450684
+    },
+    {
+      "step": 2250,
+      "val_auroc": 0.7519111111111112,
+      "loss": 0.6299885511398315
+    },
+    {
+      "step": 2500,
+      "val_auroc": 0.7560444444444445,
+      "loss": 0.7735756635665894
+    },
+    {
+      "step": 2750,
+      "val_auroc": 0.7547777777777779,
+      "loss": 0.8060601949691772
+    },
+    {
+      "step": 3000,
+      "val_auroc": 0.7538888888888889,
+      "loss": 1.1854121685028076
+    }
+  ],
+  "device": "cuda",
+  "minutes": 40.5
+}

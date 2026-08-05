@@ -1,0 +1,160 @@
+{
+  "stem": "psych_mimic4idx",
+  "q_query": 5,
+  "seed": 42,
+  "per_k": {
+    "1": {
+      "val": {
+        "episodes_tested": 801,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2231,
+        "patients_in_split": 2231,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.585
+      },
+      "test": {
+        "episodes_tested": 813,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2278,
+        "patients_in_split": 2278,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.566
+      },
+      "train_stress": {
+        "episodes_tested": 5000,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 10184,
+        "patients_in_split": 10290,
+        "query_coverage_fraction": 0.9897,
+        "mean_times_queried": 4.91
+      }
+    },
+    "3": {
+      "val": {
+        "episodes_tested": 801,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2231,
+        "patients_in_split": 2231,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.585
+      },
+      "test": {
+        "episodes_tested": 813,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2278,
+        "patients_in_split": 2278,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.566
+      },
+      "train_stress": {
+        "episodes_tested": 5000,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 10171,
+        "patients_in_split": 10290,
+        "query_coverage_fraction": 0.9884,
+        "mean_times_queried": 4.916
+      }
+    },
+    "5": {
+      "val": {
+        "episodes_tested": 801,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2231,
+        "patients_in_split": 2231,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.585
+      },
+      "test": {
+        "episodes_tested": 813,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2278,
+        "patients_in_split": 2278,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.566
+      },
+      "train_stress": {
+        "episodes_tested": 5000,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 10188,
+        "patients_in_split": 10290,
+        "query_coverage_fraction": 0.9901,
+        "mean_times_queried": 4.908
+      }
+    },
+    "10": {
+      "val": {
+        "episodes_tested": 801,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2231,
+        "patients_in_split": 2231,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.585
+      },
+      "test": {
+        "episodes_tested": 813,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 2278,
+        "patients_in_split": 2278,
+        "query_coverage_fraction": 1.0,
+        "mean_times_queried": 3.566
+      },
+      "train_stress": {
+        "episodes_tested": 5000,
+        "episodes_with_support_query_patient_overlap": 0,
+        "total_overlapping_patients": 0,
+        "leakage_rate": 0.0,
+        "episodes_with_duplicate_record_index": 0,
+        "episodes_with_nondistinct_support_patients": 0,
+        "distinct_patients_queried": 10158,
+        "patients_in_split": 10290,
+        "query_coverage_fraction": 0.9872,
+        "mean_times_queried": 4.922
+      }
+    }
+  },
+  "all_clean": true
+}

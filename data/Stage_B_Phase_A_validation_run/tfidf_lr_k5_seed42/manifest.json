@@ -1,0 +1,8 @@
+{
+  "run_name": "tfidf_lr_k5_seed42",
+  "baseline": "tfidf_lr",
+  "k_shot": 5,
+  "seed": 42,
+  "stem": "psych_mimic4idx",
+  "locked_threshold": 0.46849748899073035
+}

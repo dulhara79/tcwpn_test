@@ -1,0 +1,12 @@
+{
+  "model_a": "protonet_k5_seed42",
+  "model_b": "protonet_temp_k5_seed42",
+  "auroc_a": 0.5222772217894168,
+  "auroc_b": 0.4985182077865006,
+  "delta_auroc": 0.023759014002916246,
+  "z": 2.083265609408677,
+  "p_value": 0.03722701964543907,
+  "significant_at_0.05": true,
+  "n_patients": 2278,
+  "shared_patient_fraction": 1.0
+}

@@ -1,0 +1,48 @@
+{
+  "metrics": {
+    "n_patients": 2278,
+    "n_case": 1353,
+    "n_control": 925,
+    "prevalence": 0.5939420544337137,
+    "threshold": 0.4992821216583252,
+    "auroc": 0.5222772217894169,
+    "pr_auc": 0.6258759445261528,
+    "f1_positive": 0.7452492426328835,
+    "f1_macro": 0.37262462131644175,
+    "sensitivity": 1.0,
+    "specificity": 0.0,
+    "ppv": 0.5939420544337137,
+    "npv": 0.0,
+    "brier": 0.24999664513313596,
+    "ece": 0.09394314224835312,
+    "auroc_ci_lower": 0.4979148813293281,
+    "auroc_ci_upper": 0.5442548929792533,
+    "pr_auc_ci_lower": 0.5970913198400266,
+    "pr_auc_ci_upper": 0.6553575761516794,
+    "n_bootstrap_used": 2000,
+    "run": "protonet_k5_seed42",
+    "split": "test",
+    "k_shot": 5,
+    "seed": 42,
+    "blind": "none",
+    "n_episodes": 813,
+    "mean_episodes_per_patient": 3.57,
+    "query_coverage_fraction": 1.0
+  },
+  "calibration_bins": [
+    {
+      "bin_lo": 0.4,
+      "bin_hi": 0.5,
+      "n": 1173,
+      "mean_pred": 0.4999280283784927,
+      "observed_rate": 0.5754475703324808
+    },
+    {
+      "bin_lo": 0.5,
+      "bin_hi": 0.6000000000000001,
+      "n": 1105,
+      "mean_pred": 0.5000741580726513,
+      "observed_rate": 0.6135746606334842
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+blind,model,k_shot,n_seeds,auroc_mean,auroc_sd,pr_auc_mean,pr_auc_sd,f1_mean,f1_sd
+anx_meds,protonet_temp,5,1,0.4978,,0.6135,,0.7449,
+anx_meds,tcwpn_full,5,1,0.6291,,0.6933,,0.7447,
+anxiety,protonet_temp,5,1,0.4992,,0.6149,,0.7449,
+anxiety,tcwpn_full,5,1,0.6284,,0.6926,,0.745,
+none,pcw_only,5,1,0.5026,,0.618,,0.7452,
+none,protonet,5,1,0.5223,,0.6259,,0.7452,
+none,protonet_temp,5,1,0.4985,,0.6144,,0.7449,
+none,tcwpn_full,5,1,0.7379,,0.7923,,0.7648,
+none,temporal_only,5,1,0.51,,0.6092,,0.7436,
