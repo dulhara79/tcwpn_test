@@ -311,7 +311,14 @@ class PrototypicalModel(nn.Module):
             device=logits.device, dtype=torch.long,
         )
 
-        loss = F.cross_entropy(logits, targets)
+        # The PROTOTYPE loss, kept separately from the total. Without this
+        # split the training log cannot answer the question Phase 1 raised:
+        # does the episodic objective ever descend, or does the auxiliary term
+        # carry the whole decrease? ln(2) = 0.6931 is the chance level for a
+        # balanced 2-way episode, so a proto_loss pinned at ~0.693 means the
+        # prototypical objective learned nothing regardless of the total.
+        proto_loss = F.cross_entropy(logits, targets)
+        loss = proto_loss
         aux_loss = torch.zeros((), device=logits.device)
         if self.aux_head is not None:
             aux_loss = F.cross_entropy(self.aux_head(qry_emb), targets)
@@ -322,6 +329,7 @@ class PrototypicalModel(nn.Module):
 
         return {
             "loss": loss,
+            "proto_loss": proto_loss.detach(),
             "aux_loss": aux_loss.detach(),
             "logits": logits,
             "probs": probs,
@@ -366,6 +374,26 @@ ABLATION_PRESETS = {
     #                                finding but a different claim
     # ------------------------------------------------------------------
     "aux_only":                  (False,   False, True,  0.3),
+    # ------------------------------------------------------------------
+    # Auxiliary-controlled ladder. The Phase 1 result showed that every
+    # configuration WITHOUT the auxiliary head collapses (proto_cos >= 0.9997,
+    # p_sd <= 0.0018) and every configuration WITH it does not. Comparing
+    # tcwpn_full against a collapsed baseline therefore measures the auxiliary
+    # head, not w^T or w^C.
+    #
+    # These two hold the auxiliary head CONSTANT and vary one mechanism each,
+    # which is the only way to attribute a delta to that mechanism:
+    #
+    #   aux_only      = ProtoNet + tau + aux                 (already run: 0.7400)
+    #   temporal_aux  = ProtoNet + tau + aux + w^T           <- delta_temporal
+    #   pcw_aux       = ProtoNet + tau + aux + w^C           <- delta_PCW
+    #   tcwpn_full    = ProtoNet + tau + aux + w^T + w^C     (already run: 0.7335)
+    #
+    # NOTE: `aux_only` IS the supervisor's `protonet_temp_aux`. Same tuple,
+    # same numbers. It does not need re-running; relabel it in the table.
+    # ------------------------------------------------------------------
+    "temporal_aux":              (True,    False, True,  0.3),
+    "pcw_aux":                   (False,   True,  True,  0.3),
 }
 
 
