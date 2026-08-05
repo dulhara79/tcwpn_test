@@ -121,15 +121,28 @@ def main():
         sched.step()
 
         if step % 50 == 0:
+            lam = out.get("lambda_decay")
+            beta = out.get("beta_consistency")
+            mech = f"tau {out['temperature'].item():.2f}"
+            if lam is not None:
+                mech += f"  lambda {lam.item():.3f}"
+            if beta is not None:
+                mech += f"  beta {beta.item():.3f}"
             print(f"  step {step:>6}/{total_steps}  loss {out['loss'].item():.4f}  "
-                  f"tau {out['temperature'].item():.2f}  "
-                  f"{(time.time()-t0)/step:.2f}s/step")
+                  f"{mech}  {(time.time()-t0)/step:.2f}s/step")
 
         if step % eval_every == 0 or step == total_steps:
             auroc = quick_val_auroc(model, val_store, val_plan, device,
                                     max_episodes=cfg["optim"].get("val_episodes", 60))
-            history.append({"step": step, "val_auroc": auroc,
-                            "loss": float(out["loss"].item())})
+            lam = out.get("lambda_decay")
+            beta = out.get("beta_consistency")
+            history.append({
+                "step": step, "val_auroc": auroc,
+                "loss": float(out["loss"].item()),
+                "tau": float(out["temperature"].item()),
+                "lambda_decay": float(lam.item()) if lam is not None else None,
+                "beta_consistency": float(beta.item()) if beta is not None else None,
+            })
             print(f"  [val] step {step}  AUROC {auroc:.4f}"
                   f"{'  <- best' if auroc > best['auroc'] else ''}")
             if auroc > best["auroc"]:
