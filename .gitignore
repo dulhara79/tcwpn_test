@@ -3,6 +3,7 @@
 .env.*
 *.pkl
 *.pt
+*.zip
 
 data/TC-WPN — Stage C blinding fix + mechanism ablation_results/tcwpn_test
 
