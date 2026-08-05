@@ -178,3 +178,40 @@ def test_mechanism_logging_patch_is_present():
     assert "lambda_decay" in train_src, (
         "scripts/train.py does not log lambda_decay — probably an older copy."
     )
+
+
+def test_every_ablation_preset_has_a_config():
+    """
+    Stage C ran five of six presets. `temporal_pcw` had a config but was never
+    launched, and it is the one preset that separates 'the mechanisms do
+    nothing' from 'the auxiliary head does everything'. A preset with no config
+    is a row of the ablation table that quietly never gets run.
+    """
+    src = (SRC / "model.py").read_text(encoding="utf-8")
+    block = re.search(r"ABLATION_PRESETS\s*=\s*\{(.*?)\n\}", src, re.S)
+    assert block, "ABLATION_PRESETS not found in model.py"
+    presets = re.findall(r'"([a-z_0-9]+)"\s*:', block.group(1))
+    assert presets, "no presets parsed"
+    missing = [p for p in presets
+               if not (ROOT / "configs" / f"{p}.yaml").is_file()]
+    assert not missing, f"presets with no config file: {missing}"
+
+
+def test_exactly_one_preset_family_uses_the_auxiliary_head():
+    """
+    Pins the Stage C confound so it cannot silently return: if `tcwpn_full` is
+    once again the only preset with aux>0, then any comparison against it is
+    confounded by the auxiliary loss and the ablation cannot attribute anything
+    to w^T or w^C.
+    """
+    src = (SRC / "model.py").read_text(encoding="utf-8")
+    block = re.search(r"ABLATION_PRESETS\s*=\s*\{(.*?)\n\}", src, re.S)
+    rows = re.findall(
+        r'"([a-z_0-9]+)"\s*:\s*\(\s*(True|False)\s*,\s*(True|False)\s*,'
+        r'\s*(True|False)\s*,\s*([0-9.]+)\s*\)', block.group(1))
+    with_aux = [name for name, _t, _p, _tau, aux in rows if float(aux) > 0]
+    assert len(with_aux) >= 2, (
+        f"only {with_aux} use the auxiliary head. At least one preset without "
+        f"w^T/w^C must also use it, or the auxiliary loss stays confounded "
+        f"with the TC-WPN mechanisms in every comparison."
+    )

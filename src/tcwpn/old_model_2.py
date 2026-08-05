@@ -352,20 +352,6 @@ ABLATION_PRESETS = {
     "pcw_only":                  (False,   True,  True,  0.0),
     "temporal_pcw":              (True,    True,  True,  0.0),
     "tcwpn_full":                (True,    True,  True,  0.3),
-    # ------------------------------------------------------------------
-    # Added after the Stage C ablation. Every preset with aux=0.0 collapsed
-    # to chance (AUROC 0.498-0.522, predicted probabilities constant at
-    # 0.500); the only preset that learned was the only one with aux>0.
-    # `aux_only` isolates the auxiliary head from w^T and w^C so the two
-    # explanations can be told apart:
-    #     aux_only ~= tcwpn_full  -> the mechanisms contribute nothing and
-    #                                the auxiliary loss is what trains the
-    #                                encoder
-    #     aux_only <  tcwpn_full  -> the mechanisms need a trained encoder
-    #                                before they can help, which is a real
-    #                                finding but a different claim
-    # ------------------------------------------------------------------
-    "aux_only":                  (False,   False, True,  0.3),
 }
 
 
