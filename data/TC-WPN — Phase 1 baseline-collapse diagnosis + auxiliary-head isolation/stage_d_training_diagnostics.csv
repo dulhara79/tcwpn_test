@@ -1,0 +1,3 @@
+run,aux,loss_first,loss_last,loss_min,best_val,tau_final,lambda_final,beta_final,test_auroc
+aux_only_k5_seed42,aux_only,0.9029,1.0509,0.6998,0.7498,6.696,,,0.74
+temporal_pcw_k5_seed42,temporal_pcw,0.7037,0.7029,0.6618,0.5264,6.498,0.397,2.136,0.4964

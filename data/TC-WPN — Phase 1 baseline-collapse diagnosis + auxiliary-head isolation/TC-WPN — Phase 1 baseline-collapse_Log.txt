@@ -1,0 +1,1005 @@
+TC-WPN — Phase 1: baseline-collapse diagnosis + auxiliary-head isolation¶
+Accelerator: GPU T4. This is your supervisor's Phase 1, items 1–3, in the order they were specified:
+
+Debug ProtoNet's 0.5 collapse — first
+Auxiliary-head isolation — scientifically mandatory
+Inspect prototype separation and gradients
+Budget: two training runs (~95 min) plus diagnostics on the five existing Stage C checkpoints (inference only, a few minutes). No seed sweep, no K sweep, no tuning — those are Phase 2 and 3, and your supervisor was explicit that running them now would be premature.
+
+Why the collapse matters more than the AUROC
+Four of five Stage C models emitted a constant 0.5:
+
+run	p_sd	mean p (case)	mean p (control)	AUROC
+protonet	0.0001	0.5000	0.5000	0.522
+protonet_temp	0.0005	0.5000	0.5000	0.499
+pcw_only	0.0005	0.5000	0.5000	0.503
+temporal_only	0.0013	0.5000	0.4999	0.510
+tcwpn_full	0.2149	0.5822	0.4053	0.738
+The temporal_only manifest shows the episodic loss at 0.660–0.736 across all 3,000 steps. ln(2) = 0.693. It never moved — while tau learned 10.0 → 6.53 and lambda 0.500 → 0.400, so the optimiser was working.
+
+Your supervisor's framing is the right one: until we know why the baseline collapses, the ΔAUROC = 0.216 at p ≈ 2e-45 cannot be attributed to anything.
+
+The two hypotheses
+tcwpn_full is the only preset with aux_head_weight > 0. Two runs separate the explanations:
+
+temporal_pcw — both mechanisms, no auxiliary head (config existed; Stage C never launched it)
+aux_only — auxiliary head, neither mechanism (added for this run; this is your supervisor's configuration B/E)
+outcome	conclusion
+aux_only ≈ 0.73, temporal_pcw ≈ 0.50	the auxiliary loss does the work; w^T and w^C add nothing
+aux_only < tcwpn_full, both > 0.50	interaction effect — supervisor's item 31, the most interesting outcome
+temporal_pcw ≈ 0.73	stop and re-read the training code
+Write your prediction down before running.
+
+!rm -rf /kaggle/working/tcwpn_test
+!git clone -q https://github.com/dulhara79/tcwpn_test.git /kaggle/working/tcwpn_test
+%cd /kaggle/working/tcwpn_test
+!pip install -q -r requirements.txt 2>&1 | tail -2
+
+import subprocess, sys, os
+r = subprocess.run([sys.executable, "-m", "pytest",
+                    "tests/test_repo_layout.py",   # missing modules, stray duplicates
+                    "tests/test_call_arity.py",    # wrong-arg-count calls
+                    "-q", "--no-header"],
+                   capture_output=True, text=True,
+                   env={**os.environ, "PYTHONPATH": "src"})
+print(r.stdout[-2000:])
+if r.returncode != 0:
+    raise SystemExit("Repository layout is broken — fix before spending GPU time.")
+/kaggle/working/tcwpn_test
+......................................................                   [100%]
+54 passed in 0.21s
+
+from pathlib import Path
+STAGE_A_DS = Path("/kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data")
+STAGE_A = next((c for c in (STAGE_A_DS/"data"/"clean", STAGE_A_DS/"clean", STAGE_A_DS)
+                if (c/"pkl").exists()), None)
+if STAGE_A is None:
+    raise SystemExit(f"no pkl/ under {STAGE_A_DS}")
+
+PKL_DIR, PLAN_DIR = "/kaggle/working/pkl", str(STAGE_A/"plans")
+STEM, K, SEED, RESULTS = "psych_mimic4idx", 5, 42, "/kaggle/working/results"
+!mkdir -p {PKL_DIR}
+!cp {STAGE_A}/pkl/*.pkl {PKL_DIR}/
+print("ready")
+ready
+Collapse diagnostics — supervisor items 3 and 33
+diagnose_collapse.py runs inference over validation episodes on each existing checkpoint and reports exactly what was asked for:
+
+cos(p_case, p_control) — prototype separation
+mean pairwise cosine within support — embedding variance
+d(query, control proto) - d(query, case proto) — the distance gap, split by true label
+tau
+gradient L2 norm by parameter group — encoder / projection / temperature / weight modules / aux head
+It also checks the distance gap's sign. Both protonet and protonet_temp landed slightly below 0.5, which is what an inverted class-to-column mapping would produce, so that is worth ruling out explicitly rather than assuming.
+
+This is cheap — no training — so run it on all five Stage C checkpoints.
+
+# ---------------------------------------------------------------------------
+# Locate the Stage C checkpoints. Auto-discovered: any best.pt under
+# /kaggle/input or in this session's results dir. No placeholder to edit.
+# ---------------------------------------------------------------------------
+import os, glob
+
+CONFIGS_TO_DIAGNOSE = ["protonet", "protonet_temp", "temporal_only",
+                       "pcw_only", "tcwpn_full"]
+
+def find_checkpoint(cfg):
+    """Return the run dir containing best.pt for this config, or None."""
+    wanted = f"{cfg}_k{K}_seed{SEED}"
+    local = f"{RESULTS}/{STEM}/{wanted}"
+    if os.path.exists(f"{local}/best.pt"):
+        return local
+    hits = [os.path.dirname(p)
+            for p in glob.glob(f"/kaggle/input/**/{wanted}/best.pt", recursive=True)]
+    return sorted(hits)[0] if hits else None
+
+found, missing = {}, []
+for cfg in CONFIGS_TO_DIAGNOSE:
+    run = find_checkpoint(cfg)
+    (found.__setitem__(cfg, run) if run else missing.append(cfg))
+
+print(f"checkpoints found: {sorted(found)}")
+if missing:
+    print(f"checkpoints MISSING: {missing}")
+    print("\nAdd your Stage C results as an input dataset (+ Add Input).")
+    print("Any best.pt under /kaggle/input is discovered automatically.")
+if not found:
+    print("\nNo checkpoints available. The diagnostic cells below will be")
+    print("skipped; the training cells further down still work and will")
+    print("produce checkpoints you can diagnose on a second pass.")
+
+for cfg, run in found.items():
+    print("=" * 70)
+    print(f"DIAGNOSING {cfg}  ({run})")
+    !python -m scripts.diagnose_collapse --run {run} \
+        --pkl-dir {PKL_DIR} --plan-dir {PLAN_DIR} \
+        --split val --episodes 100 --grad-episodes 20 \
+        --out /kaggle/working/collapse_{cfg}.json
+checkpoints found: ['pcw_only', 'protonet', 'protonet_temp', 'tcwpn_full', 'temporal_only']
+======================================================================
+DIAGNOSING protonet  (/kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-c-data/results/psych_mimic4idx/protonet_k5_seed42)
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+config.json: 100%|█████████████████████████████| 385/385 [00:00<00:00, 1.08MB/s]
+pytorch_model.bin: 100%|██████████████████████| 436M/436M [00:04<00:00, 103MB/s]
+Loading weights:   1%| | 2/199 [00:00<00:00, 363.58it/s, Materializing param=emb
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2407.38it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+
+model.safetensors:   0%|                             | 0.00/436M [00:00<?, ?B/s]
+model.safetensors:   0%|                  | 8.13k/436M [00:00<2:58:48, 40.6kB/s]
+model.safetensors:   0%|                     | 1.68M/436M [00:02<07:29, 965kB/s]
+model.safetensors:  35%|███████▌              | 151M/436M [00:02<00:02, 106MB/s]
+model.safetensors:  59%|████████████▉         | 256M/436M [00:02<00:01, 176MB/s]
+model.safetensors:  77%|████████████████▉     | 335M/436M [00:02<00:00, 183MB/s]
+model.safetensors: 100%|██████████████████████| 436M/436M [00:03<00:00, 135MB/s]
+protonet_k5_seed42: 100 val episodes on cuda
+
+  ...25/100
+  ...50/100
+  ...75/100
+  ...100/100
+
+========================================================================
+COLLAPSE DIAGNOSTIC — protonet_k5_seed42
+========================================================================
+  proto_cos                     0.99998  (sd 0.00001, p05 0.99995, p95 0.99999)
+  support_spread_case           0.99988  (sd 0.00005, p05 0.99979, p95 0.99994)
+  support_spread_control        0.99989  (sd 0.00004, p05 0.99983, p95 0.99994)
+  support_spread_all            0.99989  (sd 0.00003, p05 0.99984, p95 0.99993)
+  query_spread_all              0.99989  (sd 0.00003, p05 0.99982, p95 0.99992)
+  emb_norm_mean                21.38283  (sd 0.00124, p05 21.38058, p95 21.38474)
+  gap_case                      0.00001  (sd 0.00004, p05 -0.00005, p95 0.00008)
+  gap_control                  -0.00000  (sd 0.00004, p05 -0.00006, p95 0.00005)
+  gap_abs_mean                  0.00005  (sd 0.00003, p05 0.00002, p95 0.00011)
+  logit_spread                  0.00054  (sd 0.00029, p05 0.00017, p95 0.00105)
+  p_pos_mean                    0.50001  (sd 0.00007, p05 0.49990, p95 0.50014)
+  p_pos_sd                      0.00016  (sd 0.00009, p05 0.00005, p95 0.00031)
+  tau                          10.00000  (sd 0.00000, p05 10.00000, p95 10.00000)
+
+  gradient L2 norm by parameter group
+    encoder                  1.390013e-01
+    projection               1.861611e-01
+
+------------------------------------------------------------------------
+READING GUIDE
+------------------------------------------------------------------------
+  cos(p_case, p_control) = 0.99998
+    -> the two prototypes are effectively the same vector.
+       Every query is equidistant, so p = 0.5 exactly. This is
+       representation collapse, not a weak classifier.
+  mean pairwise cos across all support notes = 0.99989
+    -> the encoder maps every note to nearly one point.
+  |distance gap| = 5.439e-05
+    -> the quantity the logits are built from is numerically
+       negligible; no value of tau can rescue this.
+  gap by class: case +9.877e-06, control -2.626e-06
+  encoder gradient norm = 1.390e-01
+
+wrote /kaggle/working/collapse_protonet.json
+======================================================================
+DIAGNOSING protonet_temp  (/kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-c-data/results/psych_mimic4idx/protonet_temp_k5_seed42)
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2948.60it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+protonet_temp_k5_seed42: 100 val episodes on cuda
+
+  ...25/100
+  ...50/100
+  ...75/100
+  ...100/100
+
+========================================================================
+COLLAPSE DIAGNOSTIC — protonet_temp_k5_seed42
+========================================================================
+  proto_cos                     0.99986  (sd 0.00010, p05 0.99966, p95 0.99997)
+  support_spread_case           0.99937  (sd 0.00024, p05 0.99893, p95 0.99967)
+  support_spread_control        0.99934  (sd 0.00024, p05 0.99890, p95 0.99965)
+  support_spread_all            0.99935  (sd 0.00016, p05 0.99907, p95 0.99958)
+  query_spread_all              0.99936  (sd 0.00017, p05 0.99905, p95 0.99959)
+  emb_norm_mean                18.31026  (sd 0.00333, p05 18.30516, p95 18.31587)
+  gap_case                      0.00005  (sd 0.00025, p05 -0.00036, p95 0.00043)
+  gap_control                  -0.00002  (sd 0.00028, p05 -0.00042, p95 0.00042)
+  gap_abs_mean                  0.00036  (sd 0.00021, p05 0.00011, p95 0.00070)
+  logit_spread                  0.00293  (sd 0.00173, p05 0.00087, p95 0.00565)
+  p_pos_mean                    0.50003  (sd 0.00042, p05 0.49937, p95 0.50064)
+  p_pos_sd                      0.00083  (sd 0.00051, p05 0.00023, p95 0.00171)
+  tau                           8.09104  (sd 0.00000, p05 8.09104, p95 8.09104)
+
+  gradient L2 norm by parameter group
+    encoder                  3.270730e-01
+    projection               2.773617e-01
+    temperature              2.302693e-02
+
+------------------------------------------------------------------------
+READING GUIDE
+------------------------------------------------------------------------
+  cos(p_case, p_control) = 0.99986
+    -> the two prototypes are effectively the same vector.
+       Every query is equidistant, so p = 0.5 exactly. This is
+       representation collapse, not a weak classifier.
+  mean pairwise cos across all support notes = 0.99935
+    -> the encoder maps every note to nearly one point.
+  |distance gap| = 3.621e-04
+    -> the quantity the logits are built from is numerically
+       negligible; no value of tau can rescue this.
+  gap by class: case +5.028e-05, control -1.978e-05
+  encoder gradient norm = 3.271e-01
+
+wrote /kaggle/working/collapse_protonet_temp.json
+======================================================================
+DIAGNOSING temporal_only  (/kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-c-data/results/psych_mimic4idx/temporal_only_k5_seed42)
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 3087.85it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+temporal_only_k5_seed42: 100 val episodes on cuda
+
+  ...25/100
+  ...50/100
+  ...75/100
+  ...100/100
+
+========================================================================
+COLLAPSE DIAGNOSTIC — temporal_only_k5_seed42
+========================================================================
+  proto_cos                     0.99966  (sd 0.00033, p05 0.99893, p95 0.99995)
+  support_spread_case           0.99866  (sd 0.00082, p05 0.99650, p95 0.99947)
+  support_spread_control        0.99878  (sd 0.00063, p05 0.99766, p95 0.99945)
+  support_spread_all            0.99869  (sd 0.00055, p05 0.99753, p95 0.99934)
+  query_spread_all              0.99868  (sd 0.00051, p05 0.99768, p95 0.99927)
+  emb_norm_mean                20.74003  (sd 0.00534, p05 20.73109, p95 20.74805)
+  gap_case                      0.00012  (sd 0.00084, p05 -0.00090, p95 0.00141)
+  gap_control                  -0.00006  (sd 0.00085, p05 -0.00107, p95 0.00085)
+  gap_abs_mean                  0.00092  (sd 0.00074, p05 0.00019, p95 0.00269)
+  logit_spread                  0.00628  (sd 0.00501, p05 0.00126, p95 0.01832)
+  p_pos_mean                    0.50005  (sd 0.00110, p05 0.49834, p95 0.50214)
+  p_pos_sd                      0.00182  (sd 0.00148, p05 0.00028, p95 0.00471)
+  tau                           6.80245  (sd 0.00000, p05 6.80245, p95 6.80245)
+
+  gradient L2 norm by parameter group
+    encoder                  1.731272e-01
+    projection               1.657145e-01
+    temperature              1.371940e-02
+    weight_modules           2.154936e-03
+
+------------------------------------------------------------------------
+READING GUIDE
+------------------------------------------------------------------------
+  cos(p_case, p_control) = 0.99966
+    -> the two prototypes are effectively the same vector.
+       Every query is equidistant, so p = 0.5 exactly. This is
+       representation collapse, not a weak classifier.
+  mean pairwise cos across all support notes = 0.99869
+    -> the encoder maps every note to nearly one point.
+  |distance gap| = 9.230e-04
+    -> the quantity the logits are built from is numerically
+       negligible; no value of tau can rescue this.
+  gap by class: case +1.180e-04, control -5.784e-05
+  encoder gradient norm = 1.731e-01
+
+wrote /kaggle/working/collapse_temporal_only.json
+======================================================================
+DIAGNOSING pcw_only  (/kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-c-data/results/psych_mimic4idx/pcw_only_k5_seed42)
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2249.63it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+pcw_only_k5_seed42: 100 val episodes on cuda
+
+  ...25/100
+  ...50/100
+  ...75/100
+  ...100/100
+
+========================================================================
+COLLAPSE DIAGNOSTIC — pcw_only_k5_seed42
+========================================================================
+  proto_cos                     0.99984  (sd 0.00009, p05 0.99965, p95 0.99994)
+  support_spread_case           0.99924  (sd 0.00032, p05 0.99857, p95 0.99961)
+  support_spread_control        0.99929  (sd 0.00025, p05 0.99877, p95 0.99960)
+  support_spread_all            0.99926  (sd 0.00020, p05 0.99896, p95 0.99957)
+  query_spread_all              0.99928  (sd 0.00018, p05 0.99898, p95 0.99955)
+  emb_norm_mean                18.07519  (sd 0.00204, p05 18.07197, p95 18.07858)
+  gap_case                      0.00005  (sd 0.00024, p05 -0.00034, p95 0.00054)
+  gap_control                  -0.00001  (sd 0.00023, p05 -0.00041, p95 0.00039)
+  gap_abs_mean                  0.00032  (sd 0.00018, p05 0.00011, p95 0.00066)
+  logit_spread                  0.00263  (sd 0.00143, p05 0.00089, p95 0.00532)
+  p_pos_mean                    0.50004  (sd 0.00037, p05 0.49947, p95 0.50068)
+  p_pos_sd                      0.00076  (sd 0.00044, p05 0.00026, p95 0.00164)
+  tau                           8.10699  (sd 0.00000, p05 8.10699, p95 8.10699)
+
+  gradient L2 norm by parameter group
+    encoder                  3.074773e-01
+    projection               2.942417e-01
+    temperature              2.678451e-02
+    weight_modules           1.786425e-03
+
+------------------------------------------------------------------------
+READING GUIDE
+------------------------------------------------------------------------
+  cos(p_case, p_control) = 0.99984
+    -> the two prototypes are effectively the same vector.
+       Every query is equidistant, so p = 0.5 exactly. This is
+       representation collapse, not a weak classifier.
+  mean pairwise cos across all support notes = 0.99926
+    -> the encoder maps every note to nearly one point.
+  |distance gap| = 3.245e-04
+    -> the quantity the logits are built from is numerically
+       negligible; no value of tau can rescue this.
+  gap by class: case +4.655e-05, control -1.187e-05
+  encoder gradient norm = 3.075e-01
+
+wrote /kaggle/working/collapse_pcw_only.json
+======================================================================
+DIAGNOSING tcwpn_full  (/kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-c-data/results/psych_mimic4idx/tcwpn_full_k5_seed42)
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2456.22it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+tcwpn_full_k5_seed42: 100 val episodes on cuda
+
+  ...25/100
+  ...50/100
+  ...75/100
+  ...100/100
+
+========================================================================
+COLLAPSE DIAGNOSTIC — tcwpn_full_k5_seed42
+========================================================================
+  proto_cos                     0.93159  (sd 0.05591, p05 0.83223, p95 0.99764)
+  support_spread_case           0.92696  (sd 0.03482, p05 0.86443, p95 0.97852)
+  support_spread_control        0.92824  (sd 0.03954, p05 0.86812, p95 0.97455)
+  support_spread_all            0.90489  (sd 0.02728, p05 0.85857, p95 0.94469)
+  query_spread_all              0.90693  (sd 0.02545, p05 0.86376, p95 0.95197)
+  emb_norm_mean                18.04847  (sd 0.02478, p05 18.00960, p95 18.08700)
+  gap_case                      0.08330  (sd 0.10077, p05 -0.06635, p95 0.26374)
+  gap_control                  -0.09781  (sd 0.12070, p05 -0.32342, p95 0.04613)
+  gap_abs_mean                  0.16311  (sd 0.08965, p05 0.02219, p95 0.32377)
+  logit_spread                  1.13838  (sd 0.62572, p05 0.15487, p95 2.25969)
+  p_pos_mean                    0.49283  (sd 0.09356, p05 0.30161, p95 0.63942)
+  p_pos_sd                      0.23730  (sd 0.10309, p05 0.03722, p95 0.38159)
+  tau                           6.97925  (sd 0.00000, p05 6.97925, p95 6.97925)
+
+  gradient L2 norm by parameter group
+    aux_head                 3.226627e-01
+    encoder                  5.040108e+00
+    projection               4.035454e-01
+    temperature              9.970043e-02
+    weight_modules           1.100779e-02
+
+------------------------------------------------------------------------
+READING GUIDE
+------------------------------------------------------------------------
+  cos(p_case, p_control) = 0.93159
+    -> prototypes are close but distinguishable.
+  mean pairwise cos across all support notes = 0.90489
+  |distance gap| = 1.631e-01
+  gap by class: case +8.330e-02, control -9.781e-02
+  encoder gradient norm = 5.040e+00
+
+wrote /kaggle/working/collapse_tcwpn_full.json
+# ---------------------------------------------------------------------------
+# Side-by-side: the collapsed models against the one that learned.
+# ---------------------------------------------------------------------------
+import json, glob, os
+import pandas as pd
+
+files = sorted(glob.glob("/kaggle/working/collapse_*.json"))
+if not files:
+    print("No diagnostic output found in /kaggle/working/.")
+    print("The cell above found no checkpoints, or every diagnostic run failed.")
+    print("Scroll up and read the FIRST error, not the last.")
+else:
+    rows = []
+    for f in files:
+        d = json.load(open(f))
+        g, gn = d["geometry"], d["grad_norms"]
+        pick = lambda k: round(g[k]["mean"], 5) if g.get(k) else None
+        rows.append({
+            "run": d["run"],
+            "proto_cos": pick("proto_cos"),
+            "support_spread": pick("support_spread_all"),
+            "gap_case": pick("gap_case"),
+            "gap_control": pick("gap_control"),
+            "gap_abs": pick("gap_abs_mean"),
+            "logit_spread": pick("logit_spread"),
+            "p_sd": pick("p_pos_sd"),
+            "tau": pick("tau"),
+            "grad_encoder": f"{gn.get('encoder', 0):.2e}",
+            "grad_projection": f"{gn.get('projection', 0):.2e}",
+        })
+    df = pd.DataFrame(rows).set_index("run")
+    print(df.to_string())
+    df.to_csv("/kaggle/working/collapse_comparison.csv")
+    print()
+    print("The comparison that matters: whatever differs between the collapsed")
+    print("runs and tcwpn_full IS the mechanism. If proto_cos ~ 1.0 for the four")
+    print("and clearly below for tcwpn_full, the auxiliary loss is what keeps the")
+    print("representation from collapsing -- and that is the paper's finding.")
+                         proto_cos  support_spread  gap_case  gap_control  gap_abs  logit_spread     p_sd       tau grad_encoder grad_projection
+run                                                                                                                                             
+pcw_only_k5_seed42         0.99984         0.99926   0.00005     -0.00001  0.00032       0.00263  0.00076   8.10699     3.07e-01        2.94e-01
+protonet_k5_seed42         0.99998         0.99989   0.00001     -0.00000  0.00005       0.00054  0.00016  10.00000     1.39e-01        1.86e-01
+protonet_temp_k5_seed42    0.99986         0.99935   0.00005     -0.00002  0.00036       0.00293  0.00083   8.09104     3.27e-01        2.77e-01
+tcwpn_full_k5_seed42       0.93159         0.90489   0.08330     -0.09781  0.16311       1.13838  0.23730   6.97925     5.04e+00        4.04e-01
+temporal_only_k5_seed42    0.99966         0.99869   0.00012     -0.00006  0.00092       0.00628  0.00182   6.80245     1.73e-01        1.66e-01
+
+The comparison that matters: whatever differs between the collapsed
+runs and tcwpn_full IS the mechanism. If proto_cos ~ 1.0 for the four
+and clearly below for tcwpn_full, the auxiliary loss is what keeps the
+representation from collapsing -- and that is the paper's finding.
+# Two runs, ~48 min each on a T4.
+for cfg in ["aux_only", "temporal_pcw"]:
+    print("="*70, f"\nTRAINING {cfg}\n", "="*70, sep="")
+    !python -m scripts.train --config configs/{cfg}.yaml \
+        --k {K} --seed {SEED} --stem {STEM} \
+        --pkl-dir {PKL_DIR} --plan-dir {PLAN_DIR} --results {RESULTS}
+======================================================================
+TRAINING aux_only
+======================================================================
+train: 15,566 notes / 10,290 patients
+val:   3,383 notes / 2,231 patients
+episodes: 3,000 train, 801 val
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2596.84it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+/kaggle/working/tcwpn_test/scripts/train.py:97: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+  step     50/3000  loss 0.9271  tau 9.99  0.50s/step
+  step    100/3000  loss 0.9196  tau 9.94  0.50s/step
+  step    150/3000  loss 0.8522  tau 9.85  0.50s/step
+  step    200/3000  loss 0.8954  tau 9.62  0.50s/step
+  step    250/3000  loss 0.9029  tau 9.09  0.49s/step
+  [val] step 250  AUROC 0.5617  <- best
+  step    300/3000  loss 0.9238  tau 8.80  0.60s/step
+  step    350/3000  loss 0.8841  tau 8.38  0.59s/step
+  step    400/3000  loss 0.9096  tau 8.13  0.58s/step
+  step    450/3000  loss 0.8960  tau 8.03  0.57s/step
+  step    500/3000  loss 0.8795  tau 8.00  0.56s/step
+  [val] step 500  AUROC 0.5360
+  step    550/3000  loss 0.9014  tau 7.85  0.61s/step
+  step    600/3000  loss 0.9678  tau 7.72  0.60s/step
+  step    650/3000  loss 0.9014  tau 7.60  0.59s/step
+  step    700/3000  loss 0.8994  tau 7.42  0.59s/step
+  step    750/3000  loss 0.8883  tau 7.32  0.58s/step
+  [val] step 750  AUROC 0.5637  <- best
+  step    800/3000  loss 0.8899  tau 7.15  0.61s/step
+  step    850/3000  loss 0.8230  tau 7.12  0.61s/step
+  step    900/3000  loss 0.8569  tau 7.04  0.60s/step
+  step    950/3000  loss 1.0152  tau 6.98  0.60s/step
+  step   1000/3000  loss 0.9464  tau 6.93  0.59s/step
+  [val] step 1000  AUROC 0.6910  <- best
+  step   1050/3000  loss 0.5978  tau 6.90  0.62s/step
+  step   1100/3000  loss 0.9683  tau 6.89  0.61s/step
+  step   1150/3000  loss 0.7626  tau 6.85  0.61s/step
+  step   1200/3000  loss 0.7165  tau 6.80  0.60s/step
+  step   1250/3000  loss 0.6998  tau 6.78  0.60s/step
+  [val] step 1250  AUROC 0.7254  <- best
+  step   1300/3000  loss 0.8541  tau 6.77  0.62s/step
+  step   1350/3000  loss 1.3384  tau 6.76  0.61s/step
+  step   1400/3000  loss 0.6197  tau 6.76  0.61s/step
+  step   1450/3000  loss 0.6335  tau 6.76  0.61s/step
+  step   1500/3000  loss 0.9284  tau 6.75  0.60s/step
+  [val] step 1500  AUROC 0.7343  <- best
+  step   1550/3000  loss 0.7136  tau 6.74  0.62s/step
+  step   1600/3000  loss 0.8270  tau 6.74  0.62s/step
+  step   1650/3000  loss 0.9591  tau 6.73  0.61s/step
+  step   1700/3000  loss 0.4780  tau 6.73  0.61s/step
+  step   1750/3000  loss 0.8140  tau 6.74  0.60s/step
+  [val] step 1750  AUROC 0.7396  <- best
+  step   1800/3000  loss 1.0418  tau 6.72  0.62s/step
+  step   1850/3000  loss 0.7269  tau 6.71  0.62s/step
+  step   1900/3000  loss 0.5321  tau 6.71  0.61s/step
+  step   1950/3000  loss 1.0212  tau 6.71  0.61s/step
+  step   2000/3000  loss 0.7384  tau 6.70  0.61s/step
+  [val] step 2000  AUROC 0.7377
+  step   2050/3000  loss 0.6039  tau 6.70  0.62s/step
+  step   2100/3000  loss 0.8988  tau 6.71  0.62s/step
+  step   2150/3000  loss 0.6075  tau 6.70  0.61s/step
+  step   2200/3000  loss 1.4050  tau 6.70  0.61s/step
+  step   2250/3000  loss 0.7083  tau 6.70  0.61s/step
+  [val] step 2250  AUROC 0.7498  <- best
+  step   2300/3000  loss 0.6327  tau 6.70  0.62s/step
+  step   2350/3000  loss 0.6170  tau 6.71  0.62s/step
+  step   2400/3000  loss 1.7787  tau 6.71  0.61s/step
+  step   2450/3000  loss 0.8918  tau 6.70  0.61s/step
+  step   2500/3000  loss 0.7373  tau 6.70  0.61s/step
+  [val] step 2500  AUROC 0.7414
+  step   2550/3000  loss 0.5456  tau 6.70  0.62s/step
+  step   2600/3000  loss 0.7670  tau 6.70  0.62s/step
+  step   2650/3000  loss 0.6634  tau 6.70  0.62s/step
+  step   2700/3000  loss 0.6853  tau 6.70  0.61s/step
+  step   2750/3000  loss 0.8442  tau 6.70  0.61s/step
+  [val] step 2750  AUROC 0.7456
+  step   2800/3000  loss 0.5296  tau 6.70  0.62s/step
+  step   2850/3000  loss 0.5885  tau 6.70  0.62s/step
+  step   2900/3000  loss 0.5514  tau 6.70  0.62s/step
+  step   2950/3000  loss 0.7646  tau 6.70  0.61s/step
+  step   3000/3000  loss 1.0509  tau 6.70  0.61s/step
+  [val] step 3000  AUROC 0.7450
+eval[val]: 100%|██████████████████████████████| 801/801 [07:10<00:00,  1.86it/s]
+
+locked threshold from validation: 0.2978
+wrote /kaggle/working/results/psych_mimic4idx/aux_only_k5_seed42/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/aux_only_k5_seed42 --split test
+======================================================================
+TRAINING temporal_pcw
+======================================================================
+train: 15,566 notes / 10,290 patients
+val:   3,383 notes / 2,231 patients
+episodes: 3,000 train, 801 val
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 3180.57it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+/kaggle/working/tcwpn_test/scripts/train.py:97: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+  step     50/3000  loss 0.6121  tau 9.99  lambda 0.499  beta 2.000  0.50s/step
+  step    100/3000  loss 0.6970  tau 9.94  lambda 0.499  beta 2.000  0.50s/step
+  step    150/3000  loss 0.7525  tau 9.81  lambda 0.496  beta 2.001  0.50s/step
+  step    200/3000  loss 0.6979  tau 9.57  lambda 0.491  beta 1.998  0.50s/step
+  step    250/3000  loss 0.7037  tau 9.27  lambda 0.488  beta 1.986  0.49s/step
+  [val] step 250  AUROC 0.5217  <- best
+  step    300/3000  loss 0.7791  tau 8.86  lambda 0.478  beta 2.015  0.60s/step
+  step    350/3000  loss 0.6749  tau 8.61  lambda 0.471  beta 2.025  0.59s/step
+  step    400/3000  loss 0.7316  tau 8.38  lambda 0.462  beta 2.047  0.58s/step
+  step    450/3000  loss 0.7717  tau 8.23  lambda 0.449  beta 2.049  0.57s/step
+  step    500/3000  loss 0.7313  tau 8.07  lambda 0.443  beta 2.058  0.56s/step
+  [val] step 500  AUROC 0.5264  <- best
+  step    550/3000  loss 0.7059  tau 7.90  lambda 0.440  beta 2.070  0.61s/step
+  step    600/3000  loss 0.6403  tau 7.79  lambda 0.439  beta 2.080  0.60s/step
+  step    650/3000  loss 0.6556  tau 7.66  lambda 0.435  beta 2.087  0.59s/step
+  step    700/3000  loss 0.6971  tau 7.59  lambda 0.435  beta 2.092  0.59s/step
+  step    750/3000  loss 0.7008  tau 7.52  lambda 0.435  beta 2.092  0.58s/step
+  [val] step 750  AUROC 0.5157
+  step    800/3000  loss 0.7827  tau 7.42  lambda 0.432  beta 2.096  0.62s/step
+  step    850/3000  loss 0.6985  tau 7.32  lambda 0.430  beta 2.099  0.61s/step
+  step    900/3000  loss 0.7350  tau 7.24  lambda 0.429  beta 2.111  0.60s/step
+  step    950/3000  loss 0.6977  tau 7.22  lambda 0.426  beta 2.114  0.60s/step
+  step   1000/3000  loss 0.6977  tau 7.16  lambda 0.423  beta 2.117  0.59s/step
+  [val] step 1000  AUROC 0.5154
+  step   1050/3000  loss 0.6693  tau 7.13  lambda 0.422  beta 2.115  0.62s/step
+  step   1100/3000  loss 0.6793  tau 7.08  lambda 0.421  beta 2.115  0.61s/step
+  step   1150/3000  loss 0.7278  tau 7.08  lambda 0.420  beta 2.112  0.61s/step
+  step   1200/3000  loss 0.7521  tau 7.02  lambda 0.418  beta 2.116  0.60s/step
+  step   1250/3000  loss 0.7268  tau 6.95  lambda 0.416  beta 2.117  0.60s/step
+  [val] step 1250  AUROC 0.5059
+  step   1300/3000  loss 0.7288  tau 6.92  lambda 0.416  beta 2.112  0.62s/step
+  step   1350/3000  loss 0.6927  tau 6.87  lambda 0.414  beta 2.114  0.61s/step
+  step   1400/3000  loss 0.7041  tau 6.85  lambda 0.412  beta 2.119  0.61s/step
+  step   1450/3000  loss 0.6901  tau 6.81  lambda 0.410  beta 2.123  0.60s/step
+  step   1500/3000  loss 0.7167  tau 6.77  lambda 0.407  beta 2.123  0.60s/step
+  [val] step 1500  AUROC 0.5148
+  step   1550/3000  loss 0.6899  tau 6.76  lambda 0.406  beta 2.123  0.62s/step
+  step   1600/3000  loss 0.6561  tau 6.75  lambda 0.404  beta 2.127  0.61s/step
+  step   1650/3000  loss 0.6957  tau 6.73  lambda 0.403  beta 2.126  0.61s/step
+  step   1700/3000  loss 0.6843  tau 6.70  lambda 0.402  beta 2.128  0.61s/step
+  step   1750/3000  loss 0.6773  tau 6.67  lambda 0.402  beta 2.132  0.60s/step
+  [val] step 1750  AUROC 0.5122
+  step   1800/3000  loss 0.7481  tau 6.65  lambda 0.402  beta 2.133  0.62s/step
+  step   1850/3000  loss 0.7057  tau 6.64  lambda 0.401  beta 2.132  0.61s/step
+  step   1900/3000  loss 0.7034  tau 6.61  lambda 0.400  beta 2.134  0.61s/step
+  step   1950/3000  loss 0.7136  tau 6.59  lambda 0.398  beta 2.134  0.61s/step
+  step   2000/3000  loss 0.6917  tau 6.57  lambda 0.398  beta 2.135  0.60s/step
+  [val] step 2000  AUROC 0.5148
+  step   2050/3000  loss 0.6813  tau 6.57  lambda 0.398  beta 2.135  0.62s/step
+  step   2100/3000  loss 0.6958  tau 6.57  lambda 0.398  beta 2.134  0.61s/step
+  step   2150/3000  loss 0.6819  tau 6.57  lambda 0.398  beta 2.133  0.61s/step
+  step   2200/3000  loss 0.6756  tau 6.55  lambda 0.398  beta 2.132  0.61s/step
+  step   2250/3000  loss 0.7088  tau 6.55  lambda 0.397  beta 2.132  0.61s/step
+  [val] step 2250  AUROC 0.5171
+  step   2300/3000  loss 0.6955  tau 6.54  lambda 0.397  beta 2.133  0.62s/step
+  step   2350/3000  loss 0.7151  tau 6.53  lambda 0.397  beta 2.133  0.61s/step
+  step   2400/3000  loss 0.6967  tau 6.53  lambda 0.398  beta 2.135  0.61s/step
+  step   2450/3000  loss 0.7107  tau 6.52  lambda 0.398  beta 2.135  0.61s/step
+  step   2500/3000  loss 0.6804  tau 6.51  lambda 0.397  beta 2.135  0.61s/step
+  [val] step 2500  AUROC 0.5180
+  step   2550/3000  loss 0.6881  tau 6.51  lambda 0.397  beta 2.135  0.62s/step
+  step   2600/3000  loss 0.6889  tau 6.51  lambda 0.397  beta 2.135  0.62s/step
+  step   2650/3000  loss 0.6966  tau 6.50  lambda 0.397  beta 2.136  0.61s/step
+  step   2700/3000  loss 0.7163  tau 6.50  lambda 0.397  beta 2.136  0.61s/step
+  step   2750/3000  loss 0.6618  tau 6.50  lambda 0.397  beta 2.136  0.61s/step
+  [val] step 2750  AUROC 0.5173
+  step   2800/3000  loss 0.6928  tau 6.50  lambda 0.397  beta 2.136  0.62s/step
+  step   2850/3000  loss 0.6977  tau 6.50  lambda 0.397  beta 2.136  0.62s/step
+  step   2900/3000  loss 0.7122  tau 6.50  lambda 0.397  beta 2.136  0.61s/step
+  step   2950/3000  loss 0.6991  tau 6.50  lambda 0.397  beta 2.136  0.61s/step
+  step   3000/3000  loss 0.7029  tau 6.50  lambda 0.397  beta 2.136  0.61s/step
+  [val] step 3000  AUROC 0.5173
+eval[val]: 100%|██████████████████████████████| 801/801 [07:10<00:00,  1.86it/s]
+
+locked threshold from validation: 0.4860
+wrote /kaggle/working/results/psych_mimic4idx/temporal_pcw_k5_seed42/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/temporal_pcw_k5_seed42 --split test
+for cfg in ["aux_only", "temporal_pcw"]:
+    run = f"{RESULTS}/{STEM}/{cfg}_k{K}_seed{SEED}"
+    !python -m scripts.evaluate --run {run} --split test \
+        --pkl-dir {PKL_DIR} --plan-dir {PLAN_DIR} --bootstrap 2000
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2438.25it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+eval[test]: 100%|█████████████████████████████| 813/813 [07:17<00:00,  1.86it/s]
+{
+  "n_patients": 2278,
+  "n_case": 1353,
+  "n_control": 925,
+  "prevalence": 0.5939420544337137,
+  "threshold": 0.29778483510017395,
+  "auroc": 0.7399932082858913,
+  "pr_auc": 0.7895466729671048,
+  "f1_positive": 0.7679608682360135,
+  "f1_macro": 0.5886496948183959,
+  "sensitivity": 0.9283074648928308,
+  "specificity": 0.2843243243243243,
+  "ppv": 0.6548488008342023,
+  "npv": 0.7305555555555555,
+  "brier": 0.20724112955887533,
+  "ece": 0.07657178845903208,
+  "auroc_ci_lower": 0.7193738286772488,
+  "auroc_ci_upper": 0.7609963658536423,
+  "pr_auc_ci_lower": 0.7648961521933171,
+  "pr_auc_ci_upper": 0.8131293616266041,
+  "n_bootstrap_used": 2000,
+  "run": "aux_only_k5_seed42",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 42,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/aux_only_k5_seed42/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/aux_only_k5_seed42/predictions_test.csv
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2570.49it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+eval[test]: 100%|█████████████████████████████| 813/813 [07:17<00:00,  1.86it/s]
+{
+  "n_patients": 2278,
+  "n_case": 1353,
+  "n_control": 925,
+  "prevalence": 0.5939420544337137,
+  "threshold": 0.4860477348168691,
+  "auroc": 0.496371626615529,
+  "pr_auc": 0.6065037604339703,
+  "f1_positive": 0.7449035812672177,
+  "f1_macro": 0.37245179063360884,
+  "sensitivity": 0.9992609016999261,
+  "specificity": 0.0,
+  "ppv": 0.5937637241985068,
+  "npv": 0.0,
+  "brier": 0.2500500416370324,
+  "ece": 0.09404550615849633,
+  "auroc_ci_lower": 0.47171534252715225,
+  "auroc_ci_upper": 0.5197367738625676,
+  "pr_auc_ci_lower": 0.5783044559376825,
+  "pr_auc_ci_upper": 0.6365189513523024,
+  "n_bootstrap_used": 2000,
+  "run": "temporal_pcw_k5_seed42",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 42,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/temporal_pcw_k5_seed42/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/temporal_pcw_k5_seed42/predictions_test.csv
+The verdict
+Two diagnostics decide it. The loss curve matters more than the AUROC — a loss pinned at 0.693 means the model never learned, whichever way the AUROC happened to land.
+
+import json, glob, os
+import pandas as pd
+
+rows = []
+for run in sorted(glob.glob(f"{RESULTS}/{STEM}/*")):
+    mf, ev = os.path.join(run, "manifest.json"), os.path.join(run, "eval_test.json")
+    if not os.path.exists(mf):
+        continue
+    m = json.load(open(mf))
+    h = m.get("history", [])
+    rec = {
+        "run": os.path.basename(run),
+        "aux": m["config"]["model"].get("preset", "?"),
+        "loss_first": round(h[0]["loss"], 4) if h else None,
+        "loss_last": round(h[-1]["loss"], 4) if h else None,
+        "loss_min": round(min(e["loss"] for e in h), 4) if h else None,
+        "best_val": round(m.get("best_val_auroc_quick", float("nan")), 4),
+        "tau_final": round(h[-1]["tau"], 3) if h else None,
+        "lambda_final": (round(h[-1]["lambda_decay"], 3)
+                         if h and h[-1].get("lambda_decay") else None),
+        "beta_final": (round(h[-1]["beta_consistency"], 3)
+                       if h and h[-1].get("beta_consistency") else None),
+    }
+    if os.path.exists(ev):
+        rec["test_auroc"] = round(json.load(open(ev))["metrics"]["auroc"], 4)
+    rows.append(rec)
+
+df = pd.DataFrame(rows).set_index("run")
+print(df.to_string())
+print()
+print("ln(2) = 0.6931. A loss_min at or above ~0.68 means the episodic")
+print("objective never separated the classes, regardless of AUROC.")
+df.to_csv("/kaggle/working/stage_d_training_diagnostics.csv")
+                                 aux  loss_first  loss_last  loss_min  best_val  tau_final  lambda_final  beta_final  test_auroc
+run                                                                                                                             
+aux_only_k5_seed42          aux_only      0.9029     1.0509    0.6998    0.7498      6.696           NaN         NaN      0.7400
+temporal_pcw_k5_seed42  temporal_pcw      0.7037     0.7029    0.6618    0.5264      6.498         0.397       2.136      0.4964
+
+ln(2) = 0.6931. A loss_min at or above ~0.68 means the episodic
+objective never separated the classes, regardless of AUROC.
+# Score spread: the difference between a weak model and an untrained one.
+rows = []
+for f in sorted(glob.glob(f"{RESULTS}/{STEM}/*/predictions_test.csv")):
+    d = pd.read_csv(f); p = d["p_anxiety"]
+    rows.append({"run": os.path.basename(os.path.dirname(f)),
+                 "p_sd": round(p.std(), 4),
+                 "mean_p_case": round(p[d.label == 1].mean(), 4),
+                 "mean_p_control": round(p[d.label == 0].mean(), 4),
+                 "separation": round(p[d.label == 1].mean() - p[d.label == 0].mean(), 4)})
+sd = pd.DataFrame(rows).set_index("run")
+print(sd.to_string())
+sd.to_csv("/kaggle/working/stage_d_score_spread.csv")
+print()
+print("separation < 0.01 with p_sd < 0.01  ->  untrained, not weak.")
+                          p_sd  mean_p_case  mean_p_control  separation
+run                                                                    
+aux_only_k5_seed42      0.2061       0.5873          0.4170      0.1703
+temporal_pcw_k5_seed42  0.0024       0.4999          0.4999     -0.0001
+
+separation < 0.01 with p_sd < 0.01  ->  untrained, not weak.
+import subprocess, json
+PAIRS = [("aux_only", "tcwpn_full", "do w^T and w^C add anything over the aux head?"),
+         ("temporal_pcw", "tcwpn_full", "does the aux head add anything over the mechanisms?"),
+         ("protonet_temp", "aux_only", "does the aux head alone rescue training?")]
+out = []
+for a, b, why in PAIRS:
+    pa = f"{RESULTS}/{STEM}/{a}_k{K}_seed{SEED}/predictions_test.csv"
+    pb = f"{RESULTS}/{STEM}/{b}_k{K}_seed{SEED}/predictions_test.csv"
+    dst = f"/kaggle/working/delong_{a}_vs_{b}.json"
+    subprocess.run(["python", "-m", "scripts.compare_models", "pair",
+                    "--a", pa, "--b", pb, "--out", dst], check=False)
+    try:
+        d = json.load(open(dst)); d["question"] = why; out.append(d)
+    except Exception as e:
+        print("skipped", a, b, e)
+if out:
+    t = pd.DataFrame(out)[["question", "auroc_a", "auroc_b", "delta_auroc", "p_value"]]
+    print(t.to_string(index=False))
+    t.to_csv("/kaggle/working/stage_d_delong.csv", index=False)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 145, in <module>
+    main()
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 141, in main
+    args.func(args)
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 52, in cmd_pair
+    a, b = load_preds(args.a), load_preds(args.b)
+                               ^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 43, in load_preds
+    df = pd.read_csv(path)
+         ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1880, in _make_engine
+    self.handles = get_handle(
+                   ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/common.py", line 873, in get_handle
+    handle = open(
+             ^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed42/predictions_test.csv'
+skipped aux_only tcwpn_full [Errno 2] No such file or directory: '/kaggle/working/delong_aux_only_vs_tcwpn_full.json'
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 145, in <module>
+    main()
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 141, in main
+    args.func(args)
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 52, in cmd_pair
+    a, b = load_preds(args.a), load_preds(args.b)
+                               ^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 43, in load_preds
+    df = pd.read_csv(path)
+         ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1880, in _make_engine
+    self.handles = get_handle(
+                   ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/common.py", line 873, in get_handle
+    handle = open(
+             ^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed42/predictions_test.csv'
+skipped temporal_pcw tcwpn_full [Errno 2] No such file or directory: '/kaggle/working/delong_temporal_pcw_vs_tcwpn_full.json'
+skipped protonet_temp aux_only [Errno 2] No such file or directory: '/kaggle/working/delong_protonet_temp_vs_aux_only.json'
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 145, in <module>
+    main()
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 141, in main
+    args.func(args)
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 52, in cmd_pair
+    a, b = load_preds(args.a), load_preds(args.b)
+           ^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/tcwpn_test/scripts/compare_models.py", line 43, in load_preds
+    df = pd.read_csv(path)
+         ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/parsers/readers.py", line 1880, in _make_engine
+    self.handles = get_handle(
+                   ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/pandas/io/common.py", line 873, in get_handle
+    handle = open(
+             ^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/kaggle/working/results/psych_mimic4idx/protonet_temp_k5_seed42/predictions_test.csv'
+What to tell your supervisor
+If the expected pattern holds, the paper's claim changes and gets more interesting, not less:
+
+Episodic prototypical training alone failed to train a clinical encoder in this regime — five configurations held the episodic loss at ln(2) across 3,000 episodes and produced constant predictions. Adding a lightweight per-note supervised auxiliary loss (weight 0.3) was necessary and sufficient for the encoder to learn; the temporal and prototype-consistency weightings contributed nothing measurable on top of it.
+
+That is a negative result about few-shot clinical NLP with a concrete, reproducible cause, on a benchmark you already showed is free of label leakage and patient leakage. It is publishable, and it is honest.
+
+Do not report Stage C's +0.239 as evidence for TC-WPN. Every comparison in that ladder was against a model that never trained.
+
+Two things not to skip:
+
+Report the blinding result as it stands. TC-WPN's above-chance margin falls from 0.238 to 0.128 under anx_meds — roughly 46% of the signal was lexical. Also note that anxiety and anx_meds blinding gave nearly identical results (0.6284 vs 0.6291), so the drug names carried no additional signal beyond the diagnosis terms.
+The operating point is poor and needs saying. At the locked threshold tcwpn_full runs at sensitivity 0.922, specificity 0.285. Threshold selection used f1, which at 59.4% prevalence pushes hard toward predicting positive. Consider reporting Youden-J as well, and never quote F1 alone: an all-positive classifier scores 0.745 on this cohort.
+Appendix — Phase 2 preparation only, do not run today
+Supervisor items 25–26: the tokenizer keeps only the first 512 tokens, and anxiety evidence may appear later in a discharge summary. Multi-chunk needs no code change — --max-chunks already exists and the embedder mean-pools chunks. And store_fingerprint hashes record count plus note IDs only, so 2- and 4-chunk pkls remain compatible with the frozen episode plans.
+
+Two constraints before running this:
+
+Validation only. Choose the chunk count on val, freeze it, then touch test once. Your supervisor was explicit (items 24, 34).
+Phase 1 first. If the collapse turns out to be a representation problem, 4 chunks of a collapsed representation is still collapsed. Diagnose, then improve.
+Cost also rises roughly linearly with chunk count: 4 chunks is ~4× the forward passes, so a 48-minute run becomes roughly three hours. Budget the quota.
+
+# PHASE 2 — leave commented until Phase 1 is read.
+# COHORT = str(STAGE_A / "cohort_psych_mimic4idx.csv")
+# for nc in [2, 4]:
+#     !python -m scripts.tokenize_cohort --cohort {COHORT} \
+#         --out /kaggle/working/pkl_chunk{nc} --blind none --max-chunks {nc}

@@ -1,0 +1,154 @@
+{
+  "run_name": "temporal_pcw_k5_seed42",
+  "config": {
+    "name": "temporal_pcw",
+    "description": "Both weights, no auxiliary head.\n",
+    "model": {
+      "preset": "temporal_pcw",
+      "encoder_name": "emilyalsentzer/Bio_ClinicalBERT",
+      "projection_dim": 256,
+      "freeze_bert": false,
+      "init_temperature": 10.0,
+      "init_lambda": 0.5,
+      "init_beta": 2.0,
+      "consistency_passes": 1
+    },
+    "optim": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.001,
+      "weight_decay": 0.01,
+      "warmup_frac": 0.1,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "amp": true,
+      "eval_every": 250,
+      "val_episodes": 60
+    },
+    "threshold_objective": "f1"
+  },
+  "k_shot": 5,
+  "seed": 42,
+  "stem": "psych_mimic4idx",
+  "best_val_auroc_quick": 0.5263833333333334,
+  "best_step": 500,
+  "locked_threshold": 0.4860477348168691,
+  "val_plan_meta": {
+    "kind": "eval",
+    "split": "val",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 801,
+    "n_repeats": 3,
+    "seed": 1047,
+    "store_fingerprint": "57606f017e267766"
+  },
+  "train_plan_meta": {
+    "kind": "train",
+    "split": "train",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 3000,
+    "seed": 47,
+    "store_fingerprint": "81f23d8f6020e0f2"
+  },
+  "history": [
+    {
+      "step": 250,
+      "val_auroc": 0.5216777777777778,
+      "loss": 0.7037001848220825,
+      "tau": 9.274422645568848,
+      "lambda_decay": 0.48820820450782776,
+      "beta_consistency": 1.9864826202392578
+    },
+    {
+      "step": 500,
+      "val_auroc": 0.5263833333333334,
+      "loss": 0.731305718421936,
+      "tau": 8.065402030944824,
+      "lambda_decay": 0.4426592290401459,
+      "beta_consistency": 2.057718515396118
+    },
+    {
+      "step": 750,
+      "val_auroc": 0.5157,
+      "loss": 0.7008318901062012,
+      "tau": 7.517621994018555,
+      "lambda_decay": 0.4345489740371704,
+      "beta_consistency": 2.0924108028411865
+    },
+    {
+      "step": 1000,
+      "val_auroc": 0.5154055555555556,
+      "loss": 0.6977442502975464,
+      "tau": 7.162149429321289,
+      "lambda_decay": 0.42343538999557495,
+      "beta_consistency": 2.116859197616577
+    },
+    {
+      "step": 1250,
+      "val_auroc": 0.5059,
+      "loss": 0.7268255949020386,
+      "tau": 6.950965404510498,
+      "lambda_decay": 0.4162429869174957,
+      "beta_consistency": 2.1171960830688477
+    },
+    {
+      "step": 1500,
+      "val_auroc": 0.5147833333333334,
+      "loss": 0.7167242765426636,
+      "tau": 6.772143363952637,
+      "lambda_decay": 0.4066561758518219,
+      "beta_consistency": 2.1229820251464844
+    },
+    {
+      "step": 1750,
+      "val_auroc": 0.5121555555555555,
+      "loss": 0.6772552132606506,
+      "tau": 6.665791034698486,
+      "lambda_decay": 0.4017356336116791,
+      "beta_consistency": 2.131981134414673
+    },
+    {
+      "step": 2000,
+      "val_auroc": 0.5148444444444444,
+      "loss": 0.6917065978050232,
+      "tau": 6.569165229797363,
+      "lambda_decay": 0.3978615999221802,
+      "beta_consistency": 2.134542465209961
+    },
+    {
+      "step": 2250,
+      "val_auroc": 0.5170611111111111,
+      "loss": 0.7087778449058533,
+      "tau": 6.5454511642456055,
+      "lambda_decay": 0.3974601924419403,
+      "beta_consistency": 2.131758451461792
+    },
+    {
+      "step": 2500,
+      "val_auroc": 0.5179722222222223,
+      "loss": 0.680387020111084,
+      "tau": 6.513093948364258,
+      "lambda_decay": 0.3973791003227234,
+      "beta_consistency": 2.1351029872894287
+    },
+    {
+      "step": 2750,
+      "val_auroc": 0.5173055555555556,
+      "loss": 0.661803662776947,
+      "tau": 6.498523712158203,
+      "lambda_decay": 0.3972357511520386,
+      "beta_consistency": 2.1359424591064453
+    },
+    {
+      "step": 3000,
+      "val_auroc": 0.517311111111111,
+      "loss": 0.7029231786727905,
+      "tau": 6.497778415679932,
+      "lambda_decay": 0.3971855044364929,
+      "beta_consistency": 2.1359572410583496
+    }
+  ],
+  "device": "cuda",
+  "minutes": 38.2
+}

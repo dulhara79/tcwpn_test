@@ -1,0 +1,154 @@
+{
+  "run_name": "aux_only_k5_seed42",
+  "config": {
+    "name": "aux_only",
+    "description": "ProtoNet + learnable temperature + auxiliary per-note CE head, with NO temporal weight and NO prototype-consistency weight. Added to isolate the auxiliary loss, which is the only component tcwpn_full has that no other Stage C ablation had. Inference still scores by prototype distance; the auxiliary head only shapes the encoder during training.\n",
+    "model": {
+      "preset": "aux_only",
+      "encoder_name": "emilyalsentzer/Bio_ClinicalBERT",
+      "projection_dim": 256,
+      "freeze_bert": false,
+      "init_temperature": 10.0,
+      "init_lambda": 0.5,
+      "init_beta": 2.0,
+      "consistency_passes": 1
+    },
+    "optim": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.001,
+      "weight_decay": 0.01,
+      "warmup_frac": 0.1,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "amp": true,
+      "eval_every": 250,
+      "val_episodes": 60
+    },
+    "threshold_objective": "f1"
+  },
+  "k_shot": 5,
+  "seed": 42,
+  "stem": "psych_mimic4idx",
+  "best_val_auroc_quick": 0.749788888888889,
+  "best_step": 2250,
+  "locked_threshold": 0.29778483510017395,
+  "val_plan_meta": {
+    "kind": "eval",
+    "split": "val",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 801,
+    "n_repeats": 3,
+    "seed": 1047,
+    "store_fingerprint": "57606f017e267766"
+  },
+  "train_plan_meta": {
+    "kind": "train",
+    "split": "train",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 3000,
+    "seed": 47,
+    "store_fingerprint": "81f23d8f6020e0f2"
+  },
+  "history": [
+    {
+      "step": 250,
+      "val_auroc": 0.5616666666666666,
+      "loss": 0.9029344916343689,
+      "tau": 9.085394859313965,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 500,
+      "val_auroc": 0.5359555555555555,
+      "loss": 0.8795397281646729,
+      "tau": 7.996409893035889,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 750,
+      "val_auroc": 0.5636666666666665,
+      "loss": 0.8882821202278137,
+      "tau": 7.323688983917236,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1000,
+      "val_auroc": 0.6910333333333334,
+      "loss": 0.9464089274406433,
+      "tau": 6.934875011444092,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1250,
+      "val_auroc": 0.7253555555555555,
+      "loss": 0.6997919082641602,
+      "tau": 6.780422210693359,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1500,
+      "val_auroc": 0.7343222222222221,
+      "loss": 0.9283897280693054,
+      "tau": 6.746233940124512,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1750,
+      "val_auroc": 0.7396222222222223,
+      "loss": 0.8139991164207458,
+      "tau": 6.735266208648682,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2000,
+      "val_auroc": 0.7376666666666667,
+      "loss": 0.7383974194526672,
+      "tau": 6.703524589538574,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2250,
+      "val_auroc": 0.749788888888889,
+      "loss": 0.7083274126052856,
+      "tau": 6.701682090759277,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2500,
+      "val_auroc": 0.7414000000000001,
+      "loss": 0.7372796535491943,
+      "tau": 6.701365947723389,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2750,
+      "val_auroc": 0.7455777777777778,
+      "loss": 0.8441838622093201,
+      "tau": 6.696113586425781,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 3000,
+      "val_auroc": 0.7450444444444446,
+      "loss": 1.0509251356124878,
+      "tau": 6.6958842277526855,
+      "lambda_decay": null,
+      "beta_consistency": null
+    }
+  ],
+  "device": "cuda",
+  "minutes": 38.3
+}

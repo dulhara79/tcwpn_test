@@ -5,7 +5,7 @@
 *.pt
 *.zip
 
-data/TC-WPN — Stage C blinding fix + mechanism ablation_results/tcwpn_test
+data/*/tcwpn_test
 
 cohort_psych_mimic4.csv
 cohort_psych_mimic4idx.csv
