@@ -1,0 +1,8 @@
+{
+  "run_name": "bert_probe_k5_seed42",
+  "baseline": "bert_probe",
+  "k_shot": 5,
+  "seed": 42,
+  "stem": "psych_mimic4idx",
+  "locked_threshold": 0.0024410471585547483
+}
