@@ -129,6 +129,8 @@ def main():
             if beta is not None:
                 mech += f"  beta {beta.item():.3f}"
             print(f"  step {step:>6}/{total_steps}  loss {out['loss'].item():.4f}  "
+                  f"proto {out['proto_loss'].item():.4f}  "
+                  f"aux {out['aux_loss'].item():.4f}  "
                   f"{mech}  {(time.time()-t0)/step:.2f}s/step")
 
         if step % eval_every == 0 or step == total_steps:
@@ -139,6 +141,8 @@ def main():
             history.append({
                 "step": step, "val_auroc": auroc,
                 "loss": float(out["loss"].item()),
+                "proto_loss": float(out["proto_loss"].item()),
+                "aux_loss": float(out["aux_loss"].item()),
                 "tau": float(out["temperature"].item()),
                 "lambda_decay": float(lam.item()) if lam is not None else None,
                 "beta_consistency": float(beta.item()) if beta is not None else None,
