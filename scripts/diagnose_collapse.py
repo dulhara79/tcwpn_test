@@ -215,7 +215,7 @@ def main() -> int:
     gnorms: list[dict] = []
     for i in range(min(args.grad_episodes, len(plan.episodes))):
         batch = collate_episode(plan.episodes[i], store, device)
-        gnorms.append(gradient_norms(model, batch, device))
+        gnorms.append(gradient_norms(model, batch))
     groups = sorted({g for d in gnorms for g in d})
     grad_summary = {
         g: float(np.mean([d.get(g, 0.0) for d in gnorms])) for g in groups
