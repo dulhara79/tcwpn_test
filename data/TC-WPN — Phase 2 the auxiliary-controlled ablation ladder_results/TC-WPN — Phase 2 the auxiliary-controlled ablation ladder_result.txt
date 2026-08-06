@@ -1,0 +1,932 @@
+TC-WPN — Phase 2: the auxiliary-controlled ablation ladder¶
+Accelerator: GPU T4. Two training runs, ~95 minutes.
+
+This is your supervisor's section 35 and section 12, with one correction that saves you a run.
+
+Experiment A is already done
+Your supervisor asks for protonet_temp_aux = ProtoNet + temperature + auxiliary. Checking ABLATION_PRESETS:
+
+aux_only = (temporal=False, pcw=False, learn_temp=True, aux=0.3)
+That is exactly ProtoNet + temperature + auxiliary. aux_only is protonet_temp_aux — the same tuple, already trained, AUROC 0.73999. Relabel it in the table rather than re-running it. A configs/protonet_temp_aux.yaml alias exists if you prefer the name, but running it would spend 48 minutes reproducing an identical model.
+
+So Phase 2 needs two new runs, not three:
+
+config	tau	w^T	w^C	aux	status
+protonet	✗	✗	✗	✗	done — 0.5223
+protonet_temp	✓	✗	✗	✗	done — 0.4985
+temporal_pcw	✓	✓	✓	✗	done — 0.4964
+aux_only (= protonet_temp_aux)	✓	✗	✗	✓	done — 0.7400
+temporal_aux	✓	✓	✗	✓	run now
+pcw_aux	✓	✗	✓	✓	run now
+tcwpn_full	✓	✓	✓	✓	done — 0.7335
+These two yield Δ_temporal and Δ_PCW with the auxiliary head held constant, which is the only way to attribute anything to w^T or w^C.
+
+What Phase 1 actually established
+From collapse_comparison.csv:
+
+run	proto_cos	support_spread	gap_abs	p_sd	grad_encoder
+protonet	0.99998	0.99989	0.00005	0.00016	1.39e-01
+protonet_temp	0.99986	0.99935	0.00036	0.00083	3.27e-01
+pcw_only	0.99984	0.99926	0.00032	0.00076	3.07e-01
+temporal_only	0.99966	0.99869	0.00092	0.00182	1.73e-01
+tcwpn_full	0.93159	0.90489	0.16311	0.23730	5.04e+00
+One nuance worth stating precisely in the paper: the collapsed models are not receiving zero gradient. Encoder gradient norms of 0.14–0.33 are small but not vanishing — roughly 15–36× below tcwpn_full's 5.04. So the correct description is a degenerate optimum with a live but uninformative gradient, not a dead gradient path. Do not write "gradient vanishing"; the data does not say that.
+
+A gap this notebook closes
+stage_d_training_diagnostics.csv shows aux_only with loss_first 0.9029, loss_last 1.0509, loss_min 0.6998 — yet it reaches AUROC 0.74. That looks contradictory until you notice the logged loss is the total (proto + 0.3 × aux), so it cannot tell you whether the prototypical term ever descended.
+
+train.py now logs proto_loss and aux_loss separately. If proto_loss sits at ~0.693 in aux_only while AUROC is 0.74, then the episodic objective never learned and the prototypes are separable only because the auxiliary gradient shaped the encoder. That is a sharp, quotable claim — and it is the mechanism sentence of your paper.
+
+!rm -rf /kaggle/working/tcwpn_test
+!git clone -q https://github.com/dulhara79/tcwpn_test.git /kaggle/working/tcwpn_test
+%cd /kaggle/working/tcwpn_test
+!pip install -q -r requirements.txt 2>&1 | tail -2
+
+import subprocess, sys, os
+r = subprocess.run([sys.executable, "-m", "pytest",
+                    "tests/test_repo_layout.py", "tests/test_call_arity.py",
+                    "-q", "--no-header"],
+                   capture_output=True, text=True,
+                   env={**os.environ, "PYTHONPATH": "src"})
+print(r.stdout[-2000:])
+if r.returncode != 0:
+    raise SystemExit("Repository layout is broken — fix before spending GPU time.")
+/kaggle/working/tcwpn_test
+......................................................                   [100%]
+54 passed in 0.17s
+
+from pathlib import Path
+STAGE_A_DS = Path("/kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data")
+STAGE_A = next((c for c in (STAGE_A_DS/"data"/"clean", STAGE_A_DS/"clean", STAGE_A_DS)
+                if (c/"pkl").exists()), None)
+if STAGE_A is None:
+    raise SystemExit(f"no pkl/ under {STAGE_A_DS}")
+
+PKL_DIR, PLAN_DIR = "/kaggle/working/pkl", str(STAGE_A/"plans")
+STEM, K, SEED, RESULTS = "psych_mimic4idx", 5, 42, "/kaggle/working/results"
+!mkdir -p {PKL_DIR}
+!cp {STAGE_A}/pkl/*.pkl {PKL_DIR}/
+print("ready")
+ready
+The two new runs
+for cfg in ["temporal_aux", "pcw_aux"]:
+    print("="*70, f"\nTRAINING {cfg}\n", "="*70, sep="")
+    !python -m scripts.train --config configs/{cfg}.yaml \
+        --k {K} --seed {SEED} --stem {STEM} \
+        --pkl-dir {PKL_DIR} --plan-dir {PLAN_DIR} --results {RESULTS}
+======================================================================
+TRAINING temporal_aux
+======================================================================
+train: 15,566 notes / 10,290 patients
+val:   3,383 notes / 2,231 patients
+episodes: 3,000 train, 801 val
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+config.json: 100%|█████████████████████████████| 385/385 [00:00<00:00, 1.79MB/s]
+pytorch_model.bin: 100%|██████████████████████| 436M/436M [00:03<00:00, 114MB/s]
+model.safetensors:   0%|                             | 0.00/436M [00:00<?, ?B/s]
+Loading weights:   0%|                                  | 0/199 [00:00<?, ?it/s]
+Loading weights:   1%| | 1/199 [00:00<00:00, 9279.43it/s, Materializing param=em
+Loading weights:   1%| | 1/199 [00:00<00:00, 636.85it/s, Materializing param=emb
+Loading weights:   1%| | 2/199 [00:00<00:00, 662.40it/s, Materializing param=emb
+Loading weights:   1%| | 2/199 [00:00<00:00, 462.67it/s, Materializing param=emb
+Loading weights:   2%| | 3/199 [00:00<00:00, 560.71it/s, Materializing param=emb
+Loading weights:   2%| | 3/199 [00:00<00:00, 536.93it/s, Materializing param=emb
+Loading weights:   2%| | 4/199 [00:00<00:00, 685.60it/s, Materializing param=emb
+Loading weights:   2%| | 4/199 [00:00<00:00, 669.40it/s, Materializing param=emb
+Loading weights:   3%| | 5/199 [00:00<00:00, 802.95it/s, Materializing param=emb
+Loading weights:   3%| | 5/199 [00:00<00:00, 786.95it/s, Materializing param=emb
+Loading weights:   3%| | 6/199 [00:00<00:00, 900.16it/s, Materializing param=enc
+Loading weights:   3%| | 6/199 [00:00<00:00, 883.63it/s, Materializing param=enc
+Loading weights:   4%| | 7/199 [00:00<00:00, 987.82it/s, Materializing param=enc
+Loading weights:   4%| | 7/199 [00:00<00:00, 970.39it/s, Materializing param=enc
+Loading weights:   4%| | 8/199 [00:00<00:00, 1064.95it/s, Materializing param=en
+Loading weights:   4%| | 8/199 [00:00<00:00, 1040.09it/s, Materializing param=en
+Loading weights:   5%| | 9/199 [00:00<00:00, 1128.11it/s, Materializing param=en
+Loading weights:   5%| | 9/199 [00:00<00:00, 1107.55it/s, Materializing param=en
+Loading weights:   5%| | 10/199 [00:00<00:00, 1188.32it/s, Materializing param=e
+Loading weights:   5%| | 10/199 [00:00<00:00, 1159.58it/s, Materializing param=e
+Loading weights:   6%| | 11/199 [00:00<00:00, 1240.15it/s, Materializing param=e
+Loading weights:   6%| | 11/199 [00:00<00:00, 1215.90it/s, Materializing param=e
+Loading weights:   6%| | 12/199 [00:00<00:00, 1292.61it/s, Materializing param=e
+Loading weights:   6%| | 12/199 [00:00<00:00, 1263.85it/s, Materializing param=e
+Loading weights:   7%| | 13/199 [00:00<00:00, 1329.29it/s, Materializing param=e
+Loading weights:   7%| | 13/199 [00:00<00:00, 1310.44it/s, Materializing param=e
+Loading weights:   7%| | 14/199 [00:00<00:00, 1373.67it/s, Materializing param=e
+Loading weights:   7%| | 14/199 [00:00<00:00, 1350.39it/s, Materializing param=e
+Loading weights:   8%| | 15/199 [00:00<00:00, 1396.46it/s, Materializing param=e
+Loading weights:   8%| | 15/199 [00:00<00:00, 1373.68it/s, Materializing param=e
+Loading weights:   8%| | 16/199 [00:00<00:00, 1428.70it/s, Materializing param=e
+Loading weights:   8%| | 16/199 [00:00<00:00, 1404.89it/s, Materializing param=e
+Loading weights:   9%| | 17/199 [00:00<00:00, 1446.31it/s, Materializing param=e
+Loading weights:   9%| | 17/199 [00:00<00:00, 1431.73it/s, Materializing param=e
+Loading weights:   9%| | 18/199 [00:00<00:00, 1492.87it/s, Materializing param=e
+Loading weights:   9%| | 18/199 [00:00<00:00, 1479.01it/s, Materializing param=e
+Loading weights:  10%| | 19/199 [00:00<00:00, 1540.98it/s, Materializing param=e
+Loading weights:  10%| | 19/199 [00:00<00:00, 1528.60it/s, Materializing param=e
+Loading weights:  10%| | 20/199 [00:00<00:00, 1582.64it/s, Materializing param=e
+Loading weights:  10%| | 20/199 [00:00<00:00, 1571.96it/s, Materializing param=e
+Loading weights:  11%| | 21/199 [00:00<00:00, 1628.28it/s, Materializing param=e
+Loading weights:  11%| | 21/199 [00:00<00:00, 1613.84it/s, Materializing param=e
+Loading weights:  11%| | 22/199 [00:00<00:00, 1661.05it/s, Materializing param=e
+Loading weights:  11%| | 22/199 [00:00<00:00, 1639.80it/s, Materializing param=e
+Loading weights:  12%| | 23/199 [00:00<00:00, 1676.67it/s, Materializing param=e
+Loading weights:  12%| | 23/199 [00:00<00:00, 1658.40it/s, Materializing param=e
+Loading weights:  12%| | 24/199 [00:00<00:00, 1700.59it/s, Materializing param=e
+Loading weights:  12%| | 24/199 [00:00<00:00, 1679.29it/s, Materializing param=e
+Loading weights:  13%|▏| 25/199 [00:00<00:00, 1711.57it/s, Materializing param=e
+Loading weights:  13%|▏| 25/199 [00:00<00:00, 1693.22it/s, Materializing param=e
+Loading weights:  13%|▏| 26/199 [00:00<00:00, 1727.86it/s, Materializing param=e
+Loading weights:  13%|▏| 26/199 [00:00<00:00, 1709.95it/s, Materializing param=e
+Loading weights:  14%|▏| 27/199 [00:00<00:00, 1741.02it/s, Materializing param=e
+Loading weights:  14%|▏| 27/199 [00:00<00:00, 1723.71it/s, Materializing param=e
+Loading weights:  14%|▏| 28/199 [00:00<00:00, 1760.46it/s, Materializing param=e
+Loading weights:  14%|▏| 28/199 [00:00<00:00, 1742.49it/s, Materializing param=e
+Loading weights:  15%|▏| 29/199 [00:00<00:00, 1777.20it/s, Materializing param=e
+Loading weights:  15%|▏| 29/199 [00:00<00:00, 1759.71it/s, Materializing param=e
+Loading weights:  15%|▏| 30/199 [00:00<00:00, 1792.80it/s, Materializing param=e
+Loading weights:  15%|▏| 30/199 [00:00<00:00, 1780.26it/s, Materializing param=e
+Loading weights:  16%|▏| 31/199 [00:00<00:00, 1811.87it/s, Materializing param=e
+Loading weights:  16%|▏| 31/199 [00:00<00:00, 1795.93it/s, Materializing param=e
+Loading weights:  16%|▏| 32/199 [00:00<00:00, 1826.22it/s, Materializing param=e
+Loading weights:  16%|▏| 32/199 [00:00<00:00, 1803.83it/s, Materializing param=e
+Loading weights:  17%|▏| 33/199 [00:00<00:00, 1835.31it/s, Materializing param=e
+Loading weights:  17%|▏| 33/199 [00:00<00:00, 1819.25it/s, Materializing param=e
+Loading weights:  17%|▏| 34/199 [00:00<00:00, 1846.75it/s, Materializing param=e
+Loading weights:  17%|▏| 34/199 [00:00<00:00, 1826.41it/s, Materializing param=e
+Loading weights:  18%|▏| 35/199 [00:00<00:00, 1853.38it/s, Materializing param=e
+Loading weights:  18%|▏| 35/199 [00:00<00:00, 1838.98it/s, Materializing param=e
+Loading weights:  18%|▏| 36/199 [00:00<00:00, 1867.82it/s, Materializing param=e
+Loading weights:  18%|▏| 36/199 [00:00<00:00, 1853.68it/s, Materializing param=e
+Loading weights:  19%|▏| 37/199 [00:00<00:00, 1877.01it/s, Materializing param=e
+Loading weights:  19%|▏| 37/199 [00:00<00:00, 1862.32it/s, Materializing param=e
+Loading weights:  19%|▏| 38/199 [00:00<00:00, 1890.27it/s, Materializing param=e
+Loading weights:  19%|▏| 38/199 [00:00<00:00, 1876.43it/s, Materializing param=e
+Loading weights:  20%|▏| 39/199 [00:00<00:00, 1900.72it/s, Materializing param=e
+Loading weights:  20%|▏| 39/199 [00:00<00:00, 1889.48it/s, Materializing param=e
+Loading weights:  20%|▏| 40/199 [00:00<00:00, 1923.35it/s, Materializing param=e
+Loading weights:  20%|▏| 40/199 [00:00<00:00, 1915.54it/s, Materializing param=e
+Loading weights:  21%|▏| 41/199 [00:00<00:00, 1944.33it/s, Materializing param=e
+Loading weights:  21%|▏| 41/199 [00:00<00:00, 1931.80it/s, Materializing param=e
+Loading weights:  21%|▏| 42/199 [00:00<00:00, 1957.49it/s, Materializing param=e
+Loading weights:  21%|▏| 42/199 [00:00<00:00, 1941.25it/s, Materializing param=e
+Loading weights:  22%|▏| 43/199 [00:00<00:00, 1965.04it/s, Materializing param=e
+Loading weights:  22%|▏| 43/199 [00:00<00:00, 1952.11it/s, Materializing param=e
+Loading weights:  22%|▏| 44/199 [00:00<00:00, 1974.38it/s, Materializing param=e
+Loading weights:  22%|▏| 44/199 [00:00<00:00, 1960.91it/s, Materializing param=e
+Loading weights:  23%|▏| 45/199 [00:00<00:00, 1975.19it/s, Materializing param=e
+Loading weights:  23%|▏| 45/199 [00:00<00:00, 1960.53it/s, Materializing param=e
+Loading weights:  23%|▏| 46/199 [00:00<00:00, 1980.13it/s, Materializing param=e
+Loading weights:  23%|▏| 46/199 [00:00<00:00, 1964.49it/s, Materializing param=e
+Loading weights:  24%|▏| 47/199 [00:00<00:00, 1977.55it/s, Materializing param=e
+Loading weights:  24%|▏| 47/199 [00:00<00:00, 1967.13it/s, Materializing param=e
+Loading weights:  24%|▏| 48/199 [00:00<00:00, 1992.60it/s, Materializing param=e
+Loading weights:  24%|▏| 48/199 [00:00<00:00, 1981.48it/s, Materializing param=e
+Loading weights:  25%|▏| 49/199 [00:00<00:00, 1999.50it/s, Materializing param=e
+Loading weights:  25%|▏| 49/199 [00:00<00:00, 1986.04it/s, Materializing param=e
+Loading weights:  25%|▎| 50/199 [00:00<00:00, 2005.58it/s, Materializing param=e
+Loading weights:  25%|▎| 50/199 [00:00<00:00, 1997.17it/s, Materializing param=e
+Loading weights:  26%|▎| 51/199 [00:00<00:00, 2023.93it/s, Materializing param=e
+Loading weights:  26%|▎| 51/199 [00:00<00:00, 2013.42it/s, Materializing param=e
+Loading weights:  26%|▎| 52/199 [00:00<00:00, 2031.88it/s, Materializing param=e
+Loading weights:  26%|▎| 52/199 [00:00<00:00, 2024.52it/s, Materializing param=e
+Loading weights:  27%|▎| 53/199 [00:00<00:00, 2046.60it/s, Materializing param=e
+Loading weights:  27%|▎| 53/199 [00:00<00:00, 2033.52it/s, Materializing param=e
+Loading weights:  27%|▎| 54/199 [00:00<00:00, 2052.19it/s, Materializing param=e
+Loading weights:  27%|▎| 54/199 [00:00<00:00, 2037.32it/s, Materializing param=e
+Loading weights:  28%|▎| 55/199 [00:00<00:00, 2058.84it/s, Materializing param=e
+Loading weights:  28%|▎| 55/199 [00:00<00:00, 2051.11it/s, Materializing param=e
+Loading weights:  28%|▎| 56/199 [00:00<00:00, 2076.04it/s, Materializing param=e
+Loading weights:  28%|▎| 56/199 [00:00<00:00, 2068.71it/s, Materializing param=e
+Loading weights:  29%|▎| 57/199 [00:00<00:00, 2093.20it/s, Materializing param=e
+Loading weights:  29%|▎| 57/199 [00:00<00:00, 2085.95it/s, Materializing param=e
+Loading weights:  29%|▎| 58/199 [00:00<00:00, 2108.11it/s, Materializing param=e
+Loading weights:  29%|▎| 58/199 [00:00<00:00, 2097.84it/s, Materializing param=e
+Loading weights:  30%|▎| 59/199 [00:00<00:00, 2120.79it/s, Materializing param=e
+Loading weights:  30%|▎| 59/199 [00:00<00:00, 2110.91it/s, Materializing param=e
+Loading weights:  30%|▎| 60/199 [00:00<00:00, 2132.77it/s, Materializing param=e
+Loading weights:  30%|▎| 60/199 [00:00<00:00, 2125.15it/s, Materializing param=e
+Loading weights:  31%|▎| 61/199 [00:00<00:00, 2148.85it/s, Materializing param=e
+Loading weights:  31%|▎| 61/199 [00:00<00:00, 2137.48it/s, Materializing param=e
+Loading weights:  31%|▎| 62/199 [00:00<00:00, 2157.90it/s, Materializing param=e
+Loading weights:  31%|▎| 62/199 [00:00<00:00, 2150.85it/s, Materializing param=e
+Loading weights:  32%|▎| 63/199 [00:00<00:00, 2174.66it/s, Materializing param=e
+Loading weights:  32%|▎| 63/199 [00:00<00:00, 2165.73it/s, Materializing param=e
+Loading weights:  32%|▎| 64/199 [00:00<00:00, 2182.15it/s, Materializing param=e
+Loading weights:  32%|▎| 64/199 [00:00<00:00, 2170.35it/s, Materializing param=e
+Loading weights:  33%|▎| 65/199 [00:00<00:00, 2185.13it/s, Materializing param=e
+Loading weights:  33%|▎| 65/199 [00:00<00:00, 2173.72it/s, Materializing param=e
+Loading weights:  33%|▎| 66/199 [00:00<00:00, 2188.96it/s, Materializing param=e
+Loading weights:  33%|▎| 66/199 [00:00<00:00, 2177.75it/s, Materializing param=e
+Loading weights:  34%|▎| 67/199 [00:00<00:00, 2191.47it/s, Materializing param=e
+Loading weights:  34%|▎| 67/199 [00:00<00:00, 2184.28it/s, Materializing param=e
+Loading weights:  34%|▎| 68/199 [00:00<00:00, 2201.99it/s, Materializing param=e
+Loading weights:  34%|▎| 68/199 [00:00<00:00, 2192.02it/s, Materializing param=e
+Loading weights:  35%|▎| 69/199 [00:00<00:00, 2207.28it/s, Materializing param=e
+Loading weights:  35%|▎| 69/199 [00:00<00:00, 2196.32it/s, Materializing param=e
+Loading weights:  35%|▎| 70/199 [00:00<00:00, 2207.20it/s, Materializing param=e
+Loading weights:  35%|▎| 70/199 [00:00<00:00, 2196.27it/s, Materializing param=e
+Loading weights:  36%|▎| 71/199 [00:00<00:00, 2209.71it/s, Materializing param=e
+Loading weights:  36%|▎| 71/199 [00:00<00:00, 2198.24it/s, Materializing param=e
+Loading weights:  36%|▎| 72/199 [00:00<00:00, 2211.89it/s, Materializing param=e
+Loading weights:  36%|▎| 72/199 [00:00<00:00, 2204.60it/s, Materializing param=e
+Loading weights:  37%|▎| 73/199 [00:00<00:00, 2224.53it/s, Materializing param=e
+Loading weights:  37%|▎| 73/199 [00:00<00:00, 2216.38it/s, Materializing param=e
+Loading weights:  37%|▎| 74/199 [00:00<00:00, 2234.93it/s, Materializing param=e
+Loading weights:  37%|▎| 74/199 [00:00<00:00, 2229.09it/s, Materializing param=e
+Loading weights:  38%|▍| 75/199 [00:00<00:00, 2247.90it/s, Materializing param=e
+Loading weights:  38%|▍| 75/199 [00:00<00:00, 2238.01it/s, Materializing param=e
+Loading weights:  38%|▍| 76/199 [00:00<00:00, 2255.29it/s, Materializing param=e
+Loading weights:  38%|▍| 76/199 [00:00<00:00, 2248.89it/s, Materializing param=e
+Loading weights:  39%|▍| 77/199 [00:00<00:00, 2262.97it/s, Materializing param=e
+Loading weights:  39%|▍| 77/199 [00:00<00:00, 2252.11it/s, Materializing param=e
+Loading weights:  39%|▍| 78/199 [00:00<00:00, 2265.64it/s, Materializing param=e
+Loading weights:  39%|▍| 78/199 [00:00<00:00, 2252.42it/s, Materializing param=e
+Loading weights:  40%|▍| 79/199 [00:00<00:00, 2265.41it/s, Materializing param=e
+Loading weights:  40%|▍| 79/199 [00:00<00:00, 2258.68it/s, Materializing param=e
+Loading weights:  40%|▍| 80/199 [00:00<00:00, 2276.95it/s, Materializing param=e
+Loading weights:  40%|▍| 80/199 [00:00<00:00, 2270.94it/s, Materializing param=e
+Loading weights:  41%|▍| 81/199 [00:00<00:00, 2284.80it/s, Materializing param=e
+Loading weights:  41%|▍| 81/199 [00:00<00:00, 2273.61it/s, Materializing param=e
+Loading weights:  41%|▍| 82/199 [00:00<00:00, 2289.25it/s, Materializing param=e
+Loading weights:  41%|▍| 82/199 [00:00<00:00, 2282.63it/s, Materializing param=e
+Loading weights:  42%|▍| 83/199 [00:00<00:00, 2298.73it/s, Materializing param=e
+Loading weights:  42%|▍| 83/199 [00:00<00:00, 2290.25it/s, Materializing param=e
+Loading weights:  42%|▍| 84/199 [00:00<00:00, 2300.32it/s, Materializing param=e
+Loading weights:  42%|▍| 84/199 [00:00<00:00, 2289.71it/s, Materializing param=e
+Loading weights:  43%|▍| 85/199 [00:00<00:00, 2298.55it/s, Materializing param=e
+Loading weights:  43%|▍| 85/199 [00:00<00:00, 2286.41it/s, Materializing param=e
+Loading weights:  43%|▍| 86/199 [00:00<00:00, 2293.40it/s, Materializing param=e
+Loading weights:  43%|▍| 86/199 [00:00<00:00, 2281.17it/s, Materializing param=e
+Loading weights:  44%|▍| 87/199 [00:00<00:00, 2287.14it/s, Materializing param=e
+Loading weights:  44%|▍| 87/199 [00:00<00:00, 2276.06it/s, Materializing param=e
+Loading weights:  44%|▍| 88/199 [00:00<00:00, 2280.08it/s, Materializing param=e
+Loading weights:  44%|▍| 88/199 [00:00<00:00, 2271.94it/s, Materializing param=e
+Loading weights:  45%|▍| 89/199 [00:00<00:00, 2282.27it/s, Materializing param=e
+Loading weights:  45%|▍| 89/199 [00:00<00:00, 2274.32it/s, Materializing param=e
+Loading weights:  45%|▍| 90/199 [00:00<00:00, 2285.82it/s, Materializing param=e
+Loading weights:  45%|▍| 90/199 [00:00<00:00, 2275.50it/s, Materializing param=e
+Loading weights:  46%|▍| 91/199 [00:00<00:00, 2287.64it/s, Materializing param=e
+Loading weights:  46%|▍| 91/199 [00:00<00:00, 2279.06it/s, Materializing param=e
+Loading weights:  46%|▍| 92/199 [00:00<00:00, 2289.97it/s, Materializing param=e
+Loading weights:  46%|▍| 92/199 [00:00<00:00, 2282.01it/s, Materializing param=e
+Loading weights:  47%|▍| 93/199 [00:00<00:00, 2289.48it/s, Materializing param=e
+Loading weights:  47%|▍| 93/199 [00:00<00:00, 2278.66it/s, Materializing param=e
+Loading weights:  47%|▍| 94/199 [00:00<00:00, 2284.69it/s, Materializing param=e
+Loading weights:  47%|▍| 94/199 [00:00<00:00, 2271.61it/s, Materializing param=e
+Loading weights:  48%|▍| 95/199 [00:00<00:00, 2275.40it/s, Materializing param=e
+Loading weights:  48%|▍| 95/199 [00:00<00:00, 2262.85it/s, Materializing param=e
+Loading weights:  48%|▍| 96/199 [00:00<00:00, 2267.37it/s, Materializing param=e
+Loading weights:  48%|▍| 96/199 [00:00<00:00, 2254.37it/s, Materializing param=e
+Loading weights:  49%|▍| 97/199 [00:00<00:00, 2261.18it/s, Materializing param=e
+Loading weights:  49%|▍| 97/199 [00:00<00:00, 2251.40it/s, Materializing param=e
+Loading weights:  49%|▍| 98/199 [00:00<00:00, 2258.51it/s, Materializing param=e
+Loading weights:  49%|▍| 98/199 [00:00<00:00, 2248.62it/s, Materializing param=e
+Loading weights:  50%|▍| 99/199 [00:00<00:00, 2259.79it/s, Materializing param=e
+Loading weights:  50%|▍| 99/199 [00:00<00:00, 2252.37it/s, Materializing param=e
+Loading weights:  50%|▌| 100/199 [00:00<00:00, 2263.19it/s, Materializing param=
+Loading weights:  50%|▌| 100/199 [00:00<00:00, 2256.59it/s, Materializing param=
+Loading weights:  51%|▌| 101/199 [00:00<00:00, 2266.72it/s, Materializing param=
+Loading weights:  51%|▌| 101/199 [00:00<00:00, 2259.97it/s, Materializing param=
+Loading weights:  51%|▌| 102/199 [00:00<00:00, 2268.65it/s, Materializing param=
+Loading weights:  51%|▌| 102/199 [00:00<00:00, 2259.31it/s, Materializing param=
+Loading weights:  52%|▌| 103/199 [00:00<00:00, 2266.49it/s, Materializing param=
+Loading weights:  52%|▌| 103/199 [00:00<00:00, 2256.22it/s, Materializing param=
+Loading weights:  52%|▌| 104/199 [00:00<00:00, 2263.44it/s, Materializing param=
+Loading weights:  52%|▌| 104/199 [00:00<00:00, 2256.93it/s, Materializing param=
+Loading weights:  53%|▌| 105/199 [00:00<00:00, 2263.49it/s, Materializing param=
+Loading weights:  53%|▌| 105/199 [00:00<00:00, 2252.68it/s, Materializing param=
+Loading weights:  53%|▌| 106/199 [00:00<00:00, 2260.06it/s, Materializing param=
+Loading weights:  53%|▌| 106/199 [00:00<00:00, 2250.90it/s, Materializing param=
+Loading weights:  54%|▌| 107/199 [00:00<00:00, 2258.40it/s, Materializing param=
+Loading weights:  54%|▌| 107/199 [00:00<00:00, 2248.98it/s, Materializing param=
+Loading weights:  54%|▌| 108/199 [00:00<00:00, 2257.51it/s, Materializing param=
+Loading weights:  54%|▌| 108/199 [00:00<00:00, 2249.22it/s, Materializing param=
+Loading weights:  55%|▌| 109/199 [00:00<00:00, 2258.07it/s, Materializing param=
+Loading weights:  55%|▌| 109/199 [00:00<00:00, 2248.50it/s, Materializing param=
+Loading weights:  55%|▌| 110/199 [00:00<00:00, 2255.42it/s, Materializing param=
+Loading weights:  55%|▌| 110/199 [00:00<00:00, 2248.50it/s, Materializing param=
+Loading weights:  56%|▌| 111/199 [00:00<00:00, 2258.32it/s, Materializing param=
+Loading weights:  56%|▌| 111/199 [00:00<00:00, 2250.51it/s, Materializing param=
+Loading weights:  56%|▌| 112/199 [00:00<00:00, 2259.35it/s, Materializing param=
+Loading weights:  56%|▌| 112/199 [00:00<00:00, 2251.50it/s, Materializing param=
+Loading weights:  57%|▌| 113/199 [00:00<00:00, 2261.75it/s, Materializing param=
+Loading weights:  57%|▌| 113/199 [00:00<00:00, 2255.46it/s, Materializing param=
+Loading weights:  57%|▌| 114/199 [00:00<00:00, 2263.20it/s, Materializing param=
+Loading weights:  57%|▌| 114/199 [00:00<00:00, 2255.42it/s, Materializing param=
+Loading weights:  58%|▌| 115/199 [00:00<00:00, 2263.31it/s, Materializing param=
+Loading weights:  58%|▌| 115/199 [00:00<00:00, 2257.15it/s, Materializing param=
+Loading weights:  58%|▌| 116/199 [00:00<00:00, 2263.53it/s, Materializing param=
+Loading weights:  58%|▌| 116/199 [00:00<00:00, 2256.63it/s, Materializing param=
+Loading weights:  59%|▌| 117/199 [00:00<00:00, 2261.59it/s, Materializing param=
+Loading weights:  59%|▌| 117/199 [00:00<00:00, 2253.81it/s, Materializing param=
+Loading weights:  59%|▌| 118/199 [00:00<00:00, 2261.76it/s, Materializing param=
+Loading weights:  59%|▌| 118/199 [00:00<00:00, 2253.82it/s, Materializing param=
+Loading weights:  60%|▌| 119/199 [00:00<00:00, 2260.63it/s, Materializing param=
+Loading weights:  60%|▌| 119/199 [00:00<00:00, 2251.91it/s, Materializing param=
+Loading weights:  60%|▌| 120/199 [00:00<00:00, 2258.56it/s, Materializing param=
+Loading weights:  60%|▌| 120/199 [00:00<00:00, 2251.46it/s, Materializing param=
+Loading weights:  61%|▌| 121/199 [00:00<00:00, 2254.94it/s, Materializing param=
+Loading weights:  61%|▌| 121/199 [00:00<00:00, 2247.61it/s, Materializing param=
+Loading weights:  61%|▌| 122/199 [00:00<00:00, 2253.90it/s, Materializing param=
+Loading weights:  61%|▌| 122/199 [00:00<00:00, 2245.45it/s, Materializing param=
+Loading weights:  62%|▌| 123/199 [00:00<00:00, 2251.94it/s, Materializing param=
+Loading weights:  62%|▌| 123/199 [00:00<00:00, 2243.72it/s, Materializing param=
+Loading weights:  62%|▌| 124/199 [00:00<00:00, 2251.08it/s, Materializing param=
+Loading weights:  62%|▌| 124/199 [00:00<00:00, 2243.43it/s, Materializing param=
+Loading weights:  63%|▋| 125/199 [00:00<00:00, 2247.23it/s, Materializing param=
+Loading weights:  63%|▋| 125/199 [00:00<00:00, 2240.95it/s, Materializing param=
+Loading weights:  63%|▋| 126/199 [00:00<00:00, 2248.57it/s, Materializing param=
+Loading weights:  63%|▋| 126/199 [00:00<00:00, 2243.09it/s, Materializing param=
+Loading weights:  64%|▋| 127/199 [00:00<00:00, 2250.43it/s, Materializing param=
+Loading weights:  64%|▋| 127/199 [00:00<00:00, 2242.84it/s, Materializing param=
+Loading weights:  64%|▋| 128/199 [00:00<00:00, 2250.10it/s, Materializing param=
+Loading weights:  64%|▋| 128/199 [00:00<00:00, 2245.35it/s, Materializing param=
+Loading weights:  65%|▋| 129/199 [00:00<00:00, 2251.87it/s, Materializing param=
+Loading weights:  65%|▋| 129/199 [00:00<00:00, 2246.04it/s, Materializing param=
+Loading weights:  65%|▋| 130/199 [00:00<00:00, 2250.34it/s, Materializing param=
+Loading weights:  65%|▋| 130/199 [00:00<00:00, 2244.33it/s, Materializing param=
+Loading weights:  66%|▋| 131/199 [00:00<00:00, 2249.60it/s, Materializing param=
+Loading weights:  66%|▋| 131/199 [00:00<00:00, 2243.33it/s, Materializing param=
+Loading weights:  66%|▋| 132/199 [00:00<00:00, 2247.62it/s, Materializing param=
+Loading weights:  66%|▋| 132/199 [00:00<00:00, 2240.81it/s, Materializing param=
+Loading weights:  67%|▋| 133/199 [00:00<00:00, 2247.96it/s, Materializing param=
+Loading weights:  67%|▋| 133/199 [00:00<00:00, 2240.84it/s, Materializing param=
+Loading weights:  67%|▋| 134/199 [00:00<00:00, 2246.48it/s, Materializing param=
+Loading weights:  67%|▋| 134/199 [00:00<00:00, 2239.55it/s, Materializing param=
+Loading weights:  68%|▋| 135/199 [00:00<00:00, 2246.39it/s, Materializing param=
+Loading weights:  68%|▋| 135/199 [00:00<00:00, 2239.02it/s, Materializing param=
+Loading weights:  68%|▋| 136/199 [00:00<00:00, 2242.82it/s, Materializing param=
+Loading weights:  68%|▋| 136/199 [00:00<00:00, 2236.93it/s, Materializing param=
+Loading weights:  69%|▋| 137/199 [00:00<00:00, 2242.37it/s, Materializing param=
+Loading weights:  69%|▋| 137/199 [00:00<00:00, 2235.56it/s, Materializing param=
+Loading weights:  69%|▋| 138/199 [00:00<00:00, 2240.42it/s, Materializing param=
+Loading weights:  69%|▋| 138/199 [00:00<00:00, 2233.88it/s, Materializing param=
+Loading weights:  70%|▋| 139/199 [00:00<00:00, 2239.57it/s, Materializing param=
+Loading weights:  70%|▋| 139/199 [00:00<00:00, 2233.53it/s, Materializing param=
+Loading weights:  70%|▋| 140/199 [00:00<00:00, 2238.19it/s, Materializing param=
+Loading weights:  70%|▋| 140/199 [00:00<00:00, 2231.83it/s, Materializing param=
+Loading weights:  71%|▋| 141/199 [00:00<00:00, 2237.35it/s, Materializing param=
+Loading weights:  71%|▋| 141/199 [00:00<00:00, 2231.69it/s, Materializing param=
+Loading weights:  71%|▋| 142/199 [00:00<00:00, 2235.95it/s, Materializing param=
+Loading weights:  71%|▋| 142/199 [00:00<00:00, 2228.31it/s, Materializing param=
+Loading weights:  72%|▋| 143/199 [00:00<00:00, 2234.60it/s, Materializing param=
+Loading weights:  72%|▋| 143/199 [00:00<00:00, 2227.96it/s, Materializing param=
+Loading weights:  72%|▋| 144/199 [00:00<00:00, 2234.64it/s, Materializing param=
+Loading weights:  72%|▋| 144/199 [00:00<00:00, 2226.61it/s, Materializing param=
+Loading weights:  73%|▋| 145/199 [00:00<00:00, 2231.41it/s, Materializing param=
+Loading weights:  73%|▋| 145/199 [00:00<00:00, 2225.47it/s, Materializing param=
+Loading weights:  73%|▋| 146/199 [00:00<00:00, 2230.62it/s, Materializing param=
+Loading weights:  73%|▋| 146/199 [00:00<00:00, 2222.54it/s, Materializing param=
+Loading weights:  74%|▋| 147/199 [00:00<00:00, 2228.74it/s, Materializing param=
+Loading weights:  74%|▋| 147/199 [00:00<00:00, 2222.14it/s, Materializing param=
+Loading weights:  74%|▋| 148/199 [00:00<00:00, 2225.67it/s, Materializing param=
+Loading weights:  74%|▋| 148/199 [00:00<00:00, 2220.37it/s, Materializing param=
+Loading weights:  75%|▋| 149/199 [00:00<00:00, 2226.12it/s, Materializing param=
+Loading weights:  75%|▋| 149/199 [00:00<00:00, 2221.23it/s, Materializing param=
+Loading weights:  75%|▊| 150/199 [00:00<00:00, 2227.27it/s, Materializing param=
+Loading weights:  75%|▊| 150/199 [00:00<00:00, 2219.86it/s, Materializing param=
+Loading weights:  76%|▊| 151/199 [00:00<00:00, 2224.59it/s, Materializing param=
+Loading weights:  76%|▊| 151/199 [00:00<00:00, 2219.40it/s, Materializing param=
+Loading weights:  76%|▊| 152/199 [00:00<00:00, 2224.02it/s, Materializing param=
+Loading weights:  76%|▊| 152/199 [00:00<00:00, 2217.70it/s, Materializing param=
+Loading weights:  77%|▊| 153/199 [00:00<00:00, 2222.67it/s, Materializing param=
+Loading weights:  77%|▊| 153/199 [00:00<00:00, 2217.36it/s, Materializing param=
+Loading weights:  77%|▊| 154/199 [00:00<00:00, 2222.52it/s, Materializing param=
+Loading weights:  77%|▊| 154/199 [00:00<00:00, 2217.49it/s, Materializing param=
+Loading weights:  78%|▊| 155/199 [00:00<00:00, 2221.42it/s, Materializing param=
+Loading weights:  78%|▊| 155/199 [00:00<00:00, 2217.08it/s, Materializing param=
+Loading weights:  78%|▊| 156/199 [00:00<00:00, 2223.08it/s, Materializing param=
+Loading weights:  78%|▊| 156/199 [00:00<00:00, 2218.71it/s, Materializing param=
+Loading weights:  79%|▊| 157/199 [00:00<00:00, 2222.03it/s, Materializing param=
+Loading weights:  79%|▊| 157/199 [00:00<00:00, 2215.96it/s, Materializing param=
+Loading weights:  79%|▊| 158/199 [00:00<00:00, 2221.54it/s, Materializing param=
+Loading weights:  79%|▊| 158/199 [00:00<00:00, 2215.45it/s, Materializing param=
+Loading weights:  80%|▊| 159/199 [00:00<00:00, 2217.88it/s, Materializing param=
+Loading weights:  80%|▊| 159/199 [00:00<00:00, 2211.39it/s, Materializing param=
+Loading weights:  80%|▊| 160/199 [00:00<00:00, 2216.62it/s, Materializing param=
+Loading weights:  80%|▊| 160/199 [00:00<00:00, 2211.38it/s, Materializing param=
+Loading weights:  81%|▊| 161/199 [00:00<00:00, 2215.63it/s, Materializing param=
+Loading weights:  81%|▊| 161/199 [00:00<00:00, 2209.49it/s, Materializing param=
+Loading weights:  81%|▊| 162/199 [00:00<00:00, 2214.77it/s, Materializing param=
+Loading weights:  81%|▊| 162/199 [00:00<00:00, 2209.40it/s, Materializing param=
+Loading weights:  82%|▊| 163/199 [00:00<00:00, 2212.97it/s, Materializing param=
+Loading weights:  82%|▊| 163/199 [00:00<00:00, 2208.53it/s, Materializing param=
+Loading weights:  82%|▊| 164/199 [00:00<00:00, 2212.92it/s, Materializing param=
+Loading weights:  82%|▊| 164/199 [00:00<00:00, 2208.74it/s, Materializing param=
+Loading weights:  83%|▊| 165/199 [00:00<00:00, 2211.97it/s, Materializing param=
+Loading weights:  83%|▊| 165/199 [00:00<00:00, 2206.85it/s, Materializing param=
+Loading weights:  83%|▊| 166/199 [00:00<00:00, 2212.67it/s, Materializing param=
+Loading weights:  83%|▊| 166/199 [00:00<00:00, 2208.46it/s, Materializing param=
+Loading weights:  84%|▊| 167/199 [00:00<00:00, 2213.76it/s, Materializing param=
+Loading weights:  84%|▊| 167/199 [00:00<00:00, 2207.95it/s, Materializing param=
+Loading weights:  84%|▊| 168/199 [00:00<00:00, 2213.54it/s, Materializing param=
+Loading weights:  84%|▊| 168/199 [00:00<00:00, 2209.41it/s, Materializing param=
+Loading weights:  85%|▊| 169/199 [00:00<00:00, 2214.97it/s, Materializing param=
+Loading weights:  85%|▊| 169/199 [00:00<00:00, 2209.37it/s, Materializing param=
+Loading weights:  85%|▊| 170/199 [00:00<00:00, 2213.92it/s, Materializing param=
+Loading weights:  85%|▊| 170/199 [00:00<00:00, 2209.04it/s, Materializing param=
+Loading weights:  86%|▊| 171/199 [00:00<00:00, 2213.81it/s, Materializing param=
+Loading weights:  86%|▊| 171/199 [00:00<00:00, 2208.93it/s, Materializing param=
+Loading weights:  86%|▊| 172/199 [00:00<00:00, 2212.17it/s, Materializing param=
+Loading weights:  86%|▊| 172/199 [00:00<00:00, 2207.44it/s, Materializing param=
+Loading weights:  87%|▊| 173/199 [00:00<00:00, 2215.28it/s, Materializing param=
+Loading weights:  87%|▊| 173/199 [00:00<00:00, 2212.82it/s, Materializing param=
+Loading weights:  87%|▊| 174/199 [00:00<00:00, 2212.64it/s, Materializing param=
+Loading weights:  87%|▊| 174/199 [00:00<00:00, 2206.71it/s, Materializing param=
+Loading weights:  88%|▉| 175/199 [00:00<00:00, 2213.70it/s, Materializing param=
+Loading weights:  88%|▉| 175/199 [00:00<00:00, 2210.75it/s, Materializing param=
+Loading weights:  88%|▉| 176/199 [00:00<00:00, 2218.51it/s, Materializing param=
+Loading weights:  88%|▉| 176/199 [00:00<00:00, 2215.57it/s, Materializing param=
+Loading weights:  89%|▉| 177/199 [00:00<00:00, 2220.96it/s, Materializing param=
+Loading weights:  89%|▉| 177/199 [00:00<00:00, 2217.60it/s, Materializing param=
+Loading weights:  89%|▉| 178/199 [00:00<00:00, 2226.28it/s, Materializing param=
+Loading weights:  89%|▉| 178/199 [00:00<00:00, 2222.97it/s, Materializing param=
+Loading weights:  90%|▉| 179/199 [00:00<00:00, 2230.70it/s, Materializing param=
+Loading weights:  90%|▉| 179/199 [00:00<00:00, 2228.30it/s, Materializing param=
+Loading weights:  90%|▉| 180/199 [00:00<00:00, 2235.16it/s, Materializing param=
+Loading weights:  90%|▉| 180/199 [00:00<00:00, 2232.36it/s, Materializing param=
+Loading weights:  91%|▉| 181/199 [00:00<00:00, 2240.46it/s, Materializing param=
+Loading weights:  91%|▉| 181/199 [00:00<00:00, 2236.94it/s, Materializing param=
+Loading weights:  91%|▉| 182/199 [00:00<00:00, 2244.86it/s, Materializing param=
+Loading weights:  91%|▉| 182/199 [00:00<00:00, 2242.50it/s, Materializing param=
+Loading weights:  92%|▉| 183/199 [00:00<00:00, 2250.98it/s, Materializing param=
+Loading weights:  92%|▉| 183/199 [00:00<00:00, 2247.88it/s, Materializing param=
+Loading weights:  92%|▉| 184/199 [00:00<00:00, 2253.44it/s, Materializing param=
+Loading weights:  92%|▉| 184/199 [00:00<00:00, 2250.58it/s, Materializing param=
+Loading weights:  93%|▉| 185/199 [00:00<00:00, 2256.38it/s, Materializing param=
+Loading weights:  93%|▉| 185/199 [00:00<00:00, 2252.11it/s, Materializing param=
+Loading weights:  93%|▉| 186/199 [00:00<00:00, 2257.50it/s, Materializing param=
+Loading weights:  93%|▉| 186/199 [00:00<00:00, 2252.37it/s, Materializing param=
+Loading weights:  94%|▉| 187/199 [00:00<00:00, 2259.30it/s, Materializing param=
+Loading weights:  94%|▉| 187/199 [00:00<00:00, 2256.79it/s, Materializing param=
+Loading weights:  94%|▉| 188/199 [00:00<00:00, 2264.95it/s, Materializing param=
+Loading weights:  94%|▉| 188/199 [00:00<00:00, 2262.55it/s, Materializing param=
+Loading weights:  95%|▉| 189/199 [00:00<00:00, 2268.32it/s, Materializing param=
+Loading weights:  95%|▉| 189/199 [00:00<00:00, 2263.93it/s, Materializing param=
+Loading weights:  95%|▉| 190/199 [00:00<00:00, 2268.90it/s, Materializing param=
+Loading weights:  95%|▉| 190/199 [00:00<00:00, 2264.64it/s, Materializing param=
+Loading weights:  96%|▉| 191/199 [00:00<00:00, 2271.24it/s, Materializing param=
+Loading weights:  96%|▉| 191/199 [00:00<00:00, 2268.03it/s, Materializing param=
+Loading weights:  96%|▉| 192/199 [00:00<00:00, 2275.47it/s, Materializing param=
+Loading weights:  96%|▉| 192/199 [00:00<00:00, 2271.28it/s, Materializing param=
+Loading weights:  97%|▉| 193/199 [00:00<00:00, 2278.11it/s, Materializing param=
+Loading weights:  97%|▉| 193/199 [00:00<00:00, 2275.42it/s, Materializing param=
+Loading weights:  97%|▉| 194/199 [00:00<00:00, 2283.07it/s, Materializing param=
+Loading weights:  97%|▉| 194/199 [00:00<00:00, 2280.23it/s, Materializing param=
+Loading weights:  98%|▉| 195/199 [00:00<00:00, 2287.85it/s, Materializing param=
+Loading weights:  98%|▉| 195/199 [00:00<00:00, 2284.96it/s, Materializing param=
+Loading weights:  98%|▉| 196/199 [00:00<00:00, 2289.33it/s, Materializing param=
+Loading weights:  98%|▉| 196/199 [00:00<00:00, 2285.92it/s, Materializing param=
+Loading weights:  99%|▉| 197/199 [00:00<00:00, 2291.41it/s, Materializing param=
+Loading weights:  99%|▉| 197/199 [00:00<00:00, 2287.42it/s, Materializing param=
+Loading weights:  99%|▉| 198/199 [00:00<00:00, 2291.97it/s, Materializing param=
+Loading weights:  99%|▉| 198/199 [00:00<00:00, 2286.20it/s, Materializing param=
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2290.71it/s, Materializing param=
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2279.69it/s, Materializing param=
+model.safetensors:   0%|                  | 8.13k/436M [00:00<2:18:00, 52.6kB/s]BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+/kaggle/working/tcwpn_test/scripts/train.py:97: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+model.safetensors: 100%|██████████████████████| 436M/436M [00:03<00:00, 136MB/s]
+  step     50/3000  loss 0.9102  proto 0.6979  aux 0.7077  tau 9.98  lambda 0.500  0.47s/step
+  step    100/3000  loss 0.9493  proto 0.7381  aux 0.7040  tau 9.94  lambda 0.499  0.46s/step
+  step    150/3000  loss 0.8826  proto 0.6810  aux 0.6721  tau 9.84  lambda 0.497  0.46s/step
+  step    200/3000  loss 0.9025  proto 0.6831  aux 0.7311  tau 9.63  lambda 0.492  0.46s/step
+  step    250/3000  loss 0.9009  proto 0.6628  aux 0.7938  tau 9.19  lambda 0.490  0.47s/step
+  [val] step 250  AUROC 0.5321  <- best
+  step    300/3000  loss 0.9564  proto 0.7531  aux 0.6776  tau 8.74  lambda 0.484  0.58s/step
+  step    350/3000  loss 0.9087  proto 0.6999  aux 0.6958  tau 8.40  lambda 0.482  0.57s/step
+  step    400/3000  loss 0.8692  proto 0.6502  aux 0.7298  tau 8.08  lambda 0.477  0.56s/step
+  step    450/3000  loss 0.9049  proto 0.6819  aux 0.7434  tau 7.87  lambda 0.473  0.55s/step
+  step    500/3000  loss 0.8277  proto 0.6318  aux 0.6530  tau 7.85  lambda 0.468  0.54s/step
+  [val] step 500  AUROC 0.5446  <- best
+  step    550/3000  loss 0.8902  proto 0.6819  aux 0.6945  tau 7.67  lambda 0.469  0.60s/step
+  step    600/3000  loss 0.9328  proto 0.7138  aux 0.7300  tau 7.56  lambda 0.465  0.59s/step
+  step    650/3000  loss 0.9009  proto 0.6821  aux 0.7293  tau 7.39  lambda 0.461  0.58s/step
+  step    700/3000  loss 0.9510  proto 0.7455  aux 0.6852  tau 7.26  lambda 0.456  0.57s/step
+  step    750/3000  loss 0.8763  proto 0.6705  aux 0.6859  tau 7.07  lambda 0.449  0.57s/step
+  [val] step 750  AUROC 0.5844  <- best
+  step    800/3000  loss 0.9168  proto 0.7044  aux 0.7080  tau 7.00  lambda 0.447  0.60s/step
+  step    850/3000  loss 0.7606  proto 0.5782  aux 0.6081  tau 6.93  lambda 0.445  0.60s/step
+  step    900/3000  loss 0.9116  proto 0.7045  aux 0.6905  tau 6.89  lambda 0.444  0.59s/step
+  step    950/3000  loss 1.0730  proto 0.8012  aux 0.9058  tau 6.80  lambda 0.442  0.58s/step
+  step   1000/3000  loss 0.9602  proto 0.7587  aux 0.6717  tau 6.78  lambda 0.442  0.58s/step
+  [val] step 1000  AUROC 0.6977  <- best
+  step   1050/3000  loss 0.6740  proto 0.5221  aux 0.5064  tau 6.75  lambda 0.441  0.61s/step
+  step   1100/3000  loss 1.1138  proto 0.8640  aux 0.8325  tau 6.74  lambda 0.438  0.60s/step
+  step   1150/3000  loss 0.7061  proto 0.5473  aux 0.5295  tau 6.70  lambda 0.438  0.60s/step
+  step   1200/3000  loss 0.7172  proto 0.5448  aux 0.5745  tau 6.68  lambda 0.437  0.59s/step
+  step   1250/3000  loss 0.6549  proto 0.4935  aux 0.5380  tau 6.66  lambda 0.433  0.59s/step
+  [val] step 1250  AUROC 0.7358  <- best
+  step   1300/3000  loss 0.8501  proto 0.6398  aux 0.7008  tau 6.64  lambda 0.429  0.61s/step
+  step   1350/3000  loss 1.2215  proto 0.9724  aux 0.8303  tau 6.62  lambda 0.428  0.60s/step
+  step   1400/3000  loss 0.5798  proto 0.4281  aux 0.5055  tau 6.62  lambda 0.429  0.60s/step
+  step   1450/3000  loss 0.7006  proto 0.5482  aux 0.5080  tau 6.60  lambda 0.427  0.60s/step
+  step   1500/3000  loss 0.8706  proto 0.6616  aux 0.6968  tau 6.59  lambda 0.427  0.59s/step
+  [val] step 1500  AUROC 0.7538  <- best
+  step   1550/3000  loss 0.7685  proto 0.6147  aux 0.5130  tau 6.59  lambda 0.425  0.61s/step
+  step   1600/3000  loss 0.8612  proto 0.6549  aux 0.6878  tau 6.58  lambda 0.425  0.61s/step
+  step   1650/3000  loss 1.1189  proto 0.9107  aux 0.6938  tau 6.58  lambda 0.425  0.60s/step
+  step   1700/3000  loss 0.5855  proto 0.4537  aux 0.4391  tau 6.58  lambda 0.425  0.60s/step
+  step   1750/3000  loss 0.7353  proto 0.5850  aux 0.5008  tau 6.58  lambda 0.422  0.60s/step
+  [val] step 1750  AUROC 0.7597  <- best
+  step   1800/3000  loss 1.1059  proto 0.8743  aux 0.7718  tau 6.56  lambda 0.422  0.61s/step
+  step   1850/3000  loss 0.6348  proto 0.4935  aux 0.4709  tau 6.56  lambda 0.423  0.61s/step
+  step   1900/3000  loss 0.6079  proto 0.4639  aux 0.4800  tau 6.55  lambda 0.423  0.61s/step
+  step   1950/3000  loss 0.9611  proto 0.7351  aux 0.7535  tau 6.55  lambda 0.423  0.60s/step
+  step   2000/3000  loss 0.6866  proto 0.5225  aux 0.5468  tau 6.54  lambda 0.422  0.60s/step
+  [val] step 2000  AUROC 0.7474
+  step   2050/3000  loss 0.5798  proto 0.4426  aux 0.4576  tau 6.54  lambda 0.422  0.61s/step
+  step   2100/3000  loss 0.9620  proto 0.7050  aux 0.8566  tau 6.54  lambda 0.421  0.61s/step
+  step   2150/3000  loss 0.6995  proto 0.5794  aux 0.4001  tau 6.53  lambda 0.420  0.61s/step
+  step   2200/3000  loss 1.2622  proto 1.0103  aux 0.8397  tau 6.54  lambda 0.420  0.60s/step
+  step   2250/3000  loss 0.6802  proto 0.5213  aux 0.5295  tau 6.53  lambda 0.420  0.60s/step
+  [val] step 2250  AUROC 0.7561
+  step   2300/3000  loss 0.7923  proto 0.5952  aux 0.6573  tau 6.53  lambda 0.420  0.61s/step
+  step   2350/3000  loss 0.4817  proto 0.3675  aux 0.3806  tau 6.54  lambda 0.420  0.61s/step
+  step   2400/3000  loss 1.5541  proto 1.3133  aux 0.8027  tau 6.54  lambda 0.420  0.61s/step
+  step   2450/3000  loss 0.9057  proto 0.7376  aux 0.5602  tau 6.54  lambda 0.420  0.61s/step
+  step   2500/3000  loss 0.7911  proto 0.6367  aux 0.5145  tau 6.53  lambda 0.420  0.60s/step
+  [val] step 2500  AUROC 0.7614  <- best
+  step   2550/3000  loss 0.6737  proto 0.5098  aux 0.5464  tau 6.54  lambda 0.420  0.61s/step
+  step   2600/3000  loss 0.5352  proto 0.4070  aux 0.4270  tau 6.53  lambda 0.420  0.61s/step
+  step   2650/3000  loss 0.5236  proto 0.4086  aux 0.3835  tau 6.53  lambda 0.420  0.61s/step
+  step   2700/3000  loss 0.5592  proto 0.4227  aux 0.4549  tau 6.53  lambda 0.420  0.61s/step
+  step   2750/3000  loss 0.7400  proto 0.6033  aux 0.4558  tau 6.53  lambda 0.420  0.60s/step
+  [val] step 2750  AUROC 0.7601
+  step   2800/3000  loss 0.6364  proto 0.4888  aux 0.4920  tau 6.53  lambda 0.420  0.61s/step
+  step   2850/3000  loss 0.7275  proto 0.5508  aux 0.5888  tau 6.53  lambda 0.420  0.61s/step
+  step   2900/3000  loss 0.5290  proto 0.4082  aux 0.4025  tau 6.53  lambda 0.420  0.61s/step
+  step   2950/3000  loss 0.6872  proto 0.5466  aux 0.4688  tau 6.53  lambda 0.420  0.61s/step
+  step   3000/3000  loss 0.9159  proto 0.7193  aux 0.6554  tau 6.53  lambda 0.420  0.61s/step
+  [val] step 3000  AUROC 0.7594
+eval[val]: 100%|██████████████████████████████| 801/801 [07:04<00:00,  1.89it/s]
+
+locked threshold from validation: 0.3000
+wrote /kaggle/working/results/psych_mimic4idx/temporal_aux_k5_seed42/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/temporal_aux_k5_seed42 --split test
+======================================================================
+TRAINING pcw_aux
+======================================================================
+train: 15,566 notes / 10,290 patients
+val:   3,383 notes / 2,231 patients
+episodes: 3,000 train, 801 val
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 3656.89it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+/kaggle/working/tcwpn_test/scripts/train.py:97: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+  step     50/3000  loss 0.9263  proto 0.7143  aux 0.7067  tau 9.99  beta 2.000  0.50s/step
+  step    100/3000  loss 0.9191  proto 0.7081  aux 0.7035  tau 9.95  beta 2.000  0.50s/step
+  step    150/3000  loss 0.8391  proto 0.6345  aux 0.6820  tau 9.85  beta 2.007  0.49s/step
+  step    200/3000  loss 0.8973  proto 0.6731  aux 0.7476  tau 9.62  beta 2.030  0.49s/step
+  step    250/3000  loss 0.9008  proto 0.6668  aux 0.7801  tau 9.12  beta 2.067  0.49s/step
+  [val] step 250  AUROC 0.5596  <- best
+  step    300/3000  loss 0.9161  proto 0.7080  aux 0.6936  tau 8.87  beta 2.113  0.60s/step
+  step    350/3000  loss 0.8846  proto 0.6792  aux 0.6848  tau 8.41  beta 2.190  0.58s/step
+  step    400/3000  loss 0.8818  proto 0.6561  aux 0.7526  tau 8.24  beta 2.219  0.57s/step
+  step    450/3000  loss 0.8995  proto 0.6706  aux 0.7632  tau 8.14  beta 2.235  0.56s/step
+  step    500/3000  loss 0.8775  proto 0.6740  aux 0.6786  tau 8.09  beta 2.239  0.55s/step
+  [val] step 500  AUROC 0.5631  <- best
+  step    550/3000  loss 0.8865  proto 0.6761  aux 0.7011  tau 8.00  beta 2.271  0.61s/step
+  step    600/3000  loss 1.0046  proto 0.7886  aux 0.7198  tau 7.87  beta 2.288  0.60s/step
+  step    650/3000  loss 0.8975  proto 0.6963  aux 0.6707  tau 7.70  beta 2.311  0.59s/step
+  step    700/3000  loss 0.9004  proto 0.6965  aux 0.6795  tau 7.56  beta 2.317  0.58s/step
+  step    750/3000  loss 0.9055  proto 0.6866  aux 0.7297  tau 7.46  beta 2.325  0.58s/step
+  [val] step 750  AUROC 0.5668  <- best
+  step    800/3000  loss 0.8834  proto 0.6768  aux 0.6889  tau 7.28  beta 2.332  0.61s/step
+  step    850/3000  loss 0.8845  proto 0.6855  aux 0.6634  tau 7.18  beta 2.335  0.60s/step
+  step    900/3000  loss 0.8744  proto 0.6679  aux 0.6884  tau 7.12  beta 2.334  0.60s/step
+  step    950/3000  loss 1.0475  proto 0.7980  aux 0.8319  tau 7.07  beta 2.321  0.59s/step
+  step   1000/3000  loss 0.9576  proto 0.7664  aux 0.6374  tau 7.01  beta 2.299  0.59s/step
+  [val] step 1000  AUROC 0.6730  <- best
+  step   1050/3000  loss 0.6238  proto 0.4608  aux 0.5434  tau 6.97  beta 2.269  0.61s/step
+  step   1100/3000  loss 0.9504  proto 0.7568  aux 0.6455  tau 6.96  beta 2.269  0.61s/step
+  step   1150/3000  loss 0.7451  proto 0.5743  aux 0.5692  tau 6.90  beta 2.267  0.60s/step
+  step   1200/3000  loss 0.7136  proto 0.5478  aux 0.5526  tau 6.87  beta 2.265  0.60s/step
+  step   1250/3000  loss 0.6909  proto 0.5238  aux 0.5569  tau 6.85  beta 2.248  0.59s/step
+  [val] step 1250  AUROC 0.7083  <- best
+  step   1300/3000  loss 0.7533  proto 0.5640  aux 0.6311  tau 6.84  beta 2.241  0.61s/step
+  step   1350/3000  loss 1.1264  proto 0.8824  aux 0.8135  tau 6.80  beta 2.234  0.61s/step
+  step   1400/3000  loss 0.5910  proto 0.4487  aux 0.4742  tau 6.80  beta 2.229  0.61s/step
+  step   1450/3000  loss 0.7555  proto 0.5795  aux 0.5867  tau 6.82  beta 2.206  0.60s/step
+  step   1500/3000  loss 0.9591  proto 0.7282  aux 0.7697  tau 6.80  beta 2.198  0.60s/step
+  [val] step 1500  AUROC 0.7325  <- best
+  step   1550/3000  loss 0.8777  proto 0.6833  aux 0.6483  tau 6.79  beta 2.193  0.62s/step
+  step   1600/3000  loss 0.9978  proto 0.7551  aux 0.8090  tau 6.78  beta 2.181  0.61s/step
+  step   1650/3000  loss 0.9561  proto 0.7559  aux 0.6674  tau 6.78  beta 2.182  0.61s/step
+  step   1700/3000  loss 0.5796  proto 0.4405  aux 0.4636  tau 6.77  beta 2.173  0.60s/step
+  step   1750/3000  loss 0.7263  proto 0.5705  aux 0.5193  tau 6.77  beta 2.167  0.60s/step
+  [val] step 1750  AUROC 0.7393  <- best
+  step   1800/3000  loss 1.0003  proto 0.7870  aux 0.7109  tau 6.75  beta 2.162  0.62s/step
+  step   1850/3000  loss 0.7038  proto 0.5405  aux 0.5444  tau 6.74  beta 2.159  0.61s/step
+  step   1900/3000  loss 0.4793  proto 0.3535  aux 0.4192  tau 6.74  beta 2.163  0.61s/step
+  step   1950/3000  loss 0.8677  proto 0.6693  aux 0.6611  tau 6.74  beta 2.159  0.61s/step
+  step   2000/3000  loss 0.6837  proto 0.5222  aux 0.5384  tau 6.74  beta 2.156  0.60s/step
+  [val] step 2000  AUROC 0.7450  <- best
+  step   2050/3000  loss 0.5152  proto 0.4140  aux 0.3371  tau 6.73  beta 2.157  0.62s/step
+  step   2100/3000  loss 0.8775  proto 0.6666  aux 0.7031  tau 6.73  beta 2.159  0.61s/step
+  step   2150/3000  loss 0.6195  proto 0.4896  aux 0.4328  tau 6.73  beta 2.157  0.61s/step
+  step   2200/3000  loss 1.2775  proto 0.9792  aux 0.9941  tau 6.74  beta 2.156  0.61s/step
+  step   2250/3000  loss 0.7698  proto 0.5919  aux 0.5927  tau 6.73  beta 2.153  0.61s/step
+  [val] step 2250  AUROC 0.7504  <- best
+  step   2300/3000  loss 0.7376  proto 0.5689  aux 0.5622  tau 6.73  beta 2.152  0.62s/step
+  step   2350/3000  loss 0.4662  proto 0.3593  aux 0.3564  tau 6.73  beta 2.152  0.61s/step
+  step   2400/3000  loss 1.7515  proto 1.5137  aux 0.7927  tau 6.74  beta 2.150  0.61s/step
+  step   2450/3000  loss 0.9253  proto 0.7219  aux 0.6780  tau 6.73  beta 2.149  0.61s/step
+  step   2500/3000  loss 0.8588  proto 0.6789  aux 0.5995  tau 6.73  beta 2.149  0.61s/step
+  [val] step 2500  AUROC 0.7496
+  step   2550/3000  loss 0.7076  proto 0.5340  aux 0.5788  tau 6.73  beta 2.148  0.62s/step
+  step   2600/3000  loss 0.7248  proto 0.5707  aux 0.5138  tau 6.73  beta 2.147  0.61s/step
+  step   2650/3000  loss 0.5807  proto 0.4563  aux 0.4147  tau 6.73  beta 2.147  0.61s/step
+  step   2700/3000  loss 0.5993  proto 0.4461  aux 0.5106  tau 6.73  beta 2.147  0.61s/step
+  step   2750/3000  loss 0.4751  proto 0.3631  aux 0.3732  tau 6.72  beta 2.146  0.61s/step
+  [val] step 2750  AUROC 0.7558  <- best
+  step   2800/3000  loss 0.5878  proto 0.4562  aux 0.4388  tau 6.72  beta 2.146  0.62s/step
+  step   2850/3000  loss 0.6879  proto 0.5279  aux 0.5333  tau 6.72  beta 2.146  0.61s/step
+  step   2900/3000  loss 0.6247  proto 0.4910  aux 0.4456  tau 6.72  beta 2.146  0.61s/step
+  step   2950/3000  loss 0.7181  proto 0.5718  aux 0.4877  tau 6.72  beta 2.146  0.61s/step
+  step   3000/3000  loss 0.9561  proto 0.7478  aux 0.6945  tau 6.72  beta 2.146  0.61s/step
+  [val] step 3000  AUROC 0.7556
+eval[val]: 100%|██████████████████████████████| 801/801 [07:04<00:00,  1.89it/s]
+
+locked threshold from validation: 0.3382
+wrote /kaggle/working/results/psych_mimic4idx/pcw_aux_k5_seed42/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/pcw_aux_k5_seed42 --split test
+Regenerate predictions_test.csv for every model
+Your Phase 1 run ended with
+
+FileNotFoundError: .../tcwpn_full_k5_seed42/predictions_test.csv
+because tcwpn_full was diagnosed from the Stage C input dataset but never re-evaluated in that session, so no predictions file existed under /kaggle/working/results. DeLong needs the paired score vectors, so every model in the ladder must be evaluated in a session that can see its checkpoint.
+
+The cell below copies any checkpoint it can find from /kaggle/input into the working results tree first, then evaluates everything uniformly. Add your Stage C and Phase 1 result datasets as inputs so the older checkpoints are reachable.
+
+import os, glob, shutil
+
+LADDER = ["protonet", "protonet_temp", "temporal_pcw", "aux_only",
+          "temporal_aux", "pcw_aux", "tcwpn_full"]
+
+for cfg in LADDER:
+    name = f"{cfg}_k{K}_seed{SEED}"
+    dst = f"{RESULTS}/{STEM}/{name}"
+    if os.path.exists(f"{dst}/best.pt"):
+        continue
+    hits = glob.glob(f"/kaggle/input/**/{name}/best.pt", recursive=True)
+    if hits:
+        src = os.path.dirname(sorted(hits)[0])
+        os.makedirs(dst, exist_ok=True)
+        for f in os.listdir(src):
+            shutil.copy2(os.path.join(src, f), dst)
+        print(f"imported {cfg} from {src}")
+    else:
+        print(f"NOT FOUND: {cfg} — add the dataset containing it as an input")
+
+print()
+for cfg in LADDER:
+    run = f"{RESULTS}/{STEM}/{cfg}_k{K}_seed{SEED}"
+    if not os.path.exists(f"{run}/best.pt"):
+        continue
+    !python -m scripts.evaluate --run {run} --split test \
+        --pkl-dir {PKL_DIR} --plan-dir {PLAN_DIR} --bootstrap 2000
+NOT FOUND: protonet — add the dataset containing it as an input
+NOT FOUND: protonet_temp — add the dataset containing it as an input
+NOT FOUND: temporal_pcw — add the dataset containing it as an input
+NOT FOUND: aux_only — add the dataset containing it as an input
+NOT FOUND: tcwpn_full — add the dataset containing it as an input
+
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2762.11it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+eval[test]: 100%|█████████████████████████████| 813/813 [07:11<00:00,  1.89it/s]
+{
+  "n_patients": 2278,
+  "n_case": 1353,
+  "n_control": 925,
+  "prevalence": 0.5939420544337137,
+  "threshold": 0.30003847430149716,
+  "auroc": 0.7415233415233415,
+  "pr_auc": 0.7874878999366488,
+  "f1_positive": 0.7709067606536366,
+  "f1_macro": 0.6363244604661911,
+  "sensitivity": 0.8891352549889135,
+  "specificity": 0.3891891891891892,
+  "ppv": 0.6804298642533937,
+  "npv": 0.7058823529411765,
+  "brier": 0.20776416487400517,
+  "ece": 0.08452080094641273,
+  "auroc_ci_lower": 0.7208750469440176,
+  "auroc_ci_upper": 0.7624440023936511,
+  "pr_auc_ci_lower": 0.7632441092951411,
+  "pr_auc_ci_upper": 0.8128511942043479,
+  "n_bootstrap_used": 2000,
+  "run": "temporal_aux_k5_seed42",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 42,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/temporal_aux_k5_seed42/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/temporal_aux_k5_seed42/predictions_test.csv
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|█| 199/199 [00:00<00:00, 2727.75it/s, Materializing param=
+BertModel LOAD REPORT from: emilyalsentzer/Bio_ClinicalBERT
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.predictions.decoder.weight             | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+eval[test]: 100%|█████████████████████████████| 813/813 [07:10<00:00,  1.89it/s]
+{
+  "n_patients": 2278,
+  "n_case": 1353,
+  "n_control": 925,
+  "prevalence": 0.5939420544337137,
+  "threshold": 0.33816764255364734,
+  "auroc": 0.7378030802421047,
+  "pr_auc": 0.784184977862743,
+  "f1_positive": 0.7701112877583466,
+  "f1_macro": 0.628854368188174,
+  "sensitivity": 0.8950480413895048,
+  "specificity": 0.37189189189189187,
+  "ppv": 0.67578125,
+  "npv": 0.7078189300411523,
+  "brier": 0.20804169010483645,
+  "ece": 0.07792998748931072,
+  "auroc_ci_lower": 0.717118327183768,
+  "auroc_ci_upper": 0.7585760272700924,
+  "pr_auc_ci_lower": 0.7600194222095618,
+  "pr_auc_ci_upper": 0.8088768263038485,
+  "n_bootstrap_used": 2000,
+  "run": "pcw_aux_k5_seed42",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 42,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/pcw_aux_k5_seed42/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/pcw_aux_k5_seed42/predictions_test.csv
+# Confirm every predictions file exists BEFORE running DeLong.
+missing = [c for c in LADDER
+           if not os.path.exists(f"{RESULTS}/{STEM}/{c}_k{K}_seed{SEED}/predictions_test.csv")]
+print("ready:", [c for c in LADDER if c not in missing])
+if missing:
+    print("MISSING predictions_test.csv:", missing)
+    print("DeLong will skip these pairs rather than crashing.")
+ready: ['temporal_aux', 'pcw_aux']
+MISSING predictions_test.csv: ['protonet', 'protonet_temp', 'temporal_pcw', 'aux_only', 'tcwpn_full']
+DeLong will skip these pairs rather than crashing.
+The ladder table
+import json, pandas as pd
+
+rows = []
+for cfg in LADDER:
+    run = f"{RESULTS}/{STEM}/{cfg}_k{K}_seed{SEED}"
+    ev, mf = f"{run}/eval_test.json", f"{run}/manifest.json"
+    if not os.path.exists(ev):
+        continue
+    m = json.load(open(ev))["metrics"]
+    row = {"model": cfg,
+           "AUROC": round(m["auroc"], 4),
+           "CI_low": round(m["auroc_ci_lower"], 4),
+           "CI_high": round(m["auroc_ci_upper"], 4),
+           "PR_AUC": round(m["pr_auc"], 4),
+           "F1": round(m["f1_positive"], 4),
+           "Sens": round(m["sensitivity"], 4),
+           "Spec": round(m["specificity"], 4),
+           "Brier": round(m["brier"], 4),
+           "ECE": round(m["ece"], 4)}
+    if os.path.exists(mf):
+        h = json.load(open(mf)).get("history", [])
+        if h:
+            row["proto_loss_min"] = round(min(
+                e.get("proto_loss", e["loss"]) for e in h), 4)
+            row["aux_loss_min"] = (round(min(e["aux_loss"] for e in h), 4)
+                                   if "aux_loss" in h[-1] else None)
+    rows.append(row)
+
+df = pd.DataFrame(rows).set_index("model")
+print(df.to_string())
+df.to_csv("/kaggle/working/phase2_ladder.csv")
+print()
+print("ln(2) = 0.6931. A proto_loss_min at ~0.693 in a model that still reaches")
+print("AUROC ~0.74 means the episodic objective never learned and the auxiliary")
+print("gradient did the representation work. That is the mechanism sentence.")
+               AUROC  CI_low  CI_high  PR_AUC      F1    Sens    Spec   Brier     ECE  proto_loss_min  aux_loss_min
+model                                                                                                              
+temporal_aux  0.7415  0.7209   0.7624  0.7875  0.7709  0.8891  0.3892  0.2078  0.0845          0.4935        0.4558
+pcw_aux       0.7378  0.7171   0.7586  0.7842  0.7701  0.8950  0.3719  0.2080  0.0779          0.3631        0.3732
+
+ln(2) = 0.6931. A proto_loss_min at ~0.693 in a model that still reaches
+AUROC ~0.74 means the episodic objective never learned and the auxiliary
+gradient did the representation work. That is the mechanism sentence.
+Paired DeLong with Holm correction
+Four comparisons, each isolating one thing. Holm rather than Bonferroni: it is uniformly more powerful and equally valid.
+
+import subprocess, json
+import pandas as pd
+
+PAIRS = [
+    ("protonet_temp", "aux_only",     "aux head, no mechanisms  -> delta_aux"),
+    ("aux_only",      "temporal_aux", "add w^T, aux held constant -> delta_temporal"),
+    ("aux_only",      "pcw_aux",      "add w^C, aux held constant -> delta_PCW"),
+    ("aux_only",      "tcwpn_full",   "add both, aux held constant -> delta_interaction"),
+]
+
+out = []
+for a, b, why in PAIRS:
+    pa = f"{RESULTS}/{STEM}/{a}_k{K}_seed{SEED}/predictions_test.csv"
+    pb = f"{RESULTS}/{STEM}/{b}_k{K}_seed{SEED}/predictions_test.csv"
+    if not (os.path.exists(pa) and os.path.exists(pb)):
+        print(f"skip {a} vs {b}: missing predictions"); continue
+    dst = f"/kaggle/working/delong_{a}_vs_{b}.json"
+    subprocess.run(["python", "-m", "scripts.compare_models", "pair",
+                    "--a", pa, "--b", pb, "--out", dst], check=False)
+    try:
+        d = json.load(open(dst)); d["comparison"] = f"{a} -> {b}"; d["isolates"] = why
+        out.append(d)
+    except Exception as e:
+        print("failed", a, b, e)
+
+if out:
+    t = pd.DataFrame(out).sort_values("p_value").reset_index(drop=True)
+    m = len(t)
+    t["holm_threshold"] = [0.05 / (m - i) for i in range(m)]
+    t["significant"] = t["p_value"] <= t["holm_threshold"]
+    # Holm is step-down: once one fails, all later ones fail too.
+    first_fail = t.index[~t["significant"]].min() if (~t["significant"]).any() else None
+    if first_fail is not None:
+        t.loc[first_fail:, "significant"] = False
+    cols = ["comparison", "isolates", "auroc_a", "auroc_b", "delta_auroc",
+            "p_value", "holm_threshold", "significant"]
+    print(t[[c for c in cols if c in t.columns]].to_string(index=False))
+    t.to_csv("/kaggle/working/phase2_delong_holm.csv", index=False)
+skip protonet_temp vs aux_only: missing predictions
+skip aux_only vs temporal_aux: missing predictions
+skip aux_only vs pcw_aux: missing predictions
+skip aux_only vs tcwpn_full: missing predictions
+Reading the result
+Your supervisor set out the three outcomes in section 13. Match yours to one and write the claim it licenses — nothing stronger.
+
+Mechanisms add nothing (temporal_aux ≈ pcw_aux ≈ aux_only ≈ 0.74). Then say so. The paper becomes: episodic prototypical training collapses on this task; a lightweight auxiliary supervised objective is necessary and sufficient to prevent it; the proposed weightings do not add measurable value. That is a legitimate negative result with a mechanism, on a leakage-controlled benchmark. It is publishable and your supervisor has explicitly endorsed it.
+
+Mechanisms add incrementally (0.74 → 0.76 → 0.78 → 0.80). Then you have the compositional contribution, and the DeLong column tells you whether each step is real.
+
+TC-WPN below aux_only — which is the current reading, 0.7335 vs 0.7400. Then the mechanisms may be actively hurting, and that must be reported too.
+
+Whatever happens, do not re-run with different seeds until a mechanism is chosen. Section 32 of your supervisor's feedback lists that as the first thing not to do, and it is the easiest mistake to make under deadline pressure.
