@@ -1,0 +1,178 @@
+{
+  "run_name": "aux_only_k5_seed44",
+  "config": {
+    "name": "aux_only",
+    "description": "ProtoNet + learnable temperature + auxiliary per-note CE head, with NO temporal weight and NO prototype-consistency weight. Added to isolate the auxiliary loss, which is the only component tcwpn_full has that no other Stage C ablation had. Inference still scores by prototype distance; the auxiliary head only shapes the encoder during training.\n",
+    "model": {
+      "preset": "aux_only",
+      "encoder_name": "emilyalsentzer/Bio_ClinicalBERT",
+      "projection_dim": 256,
+      "freeze_bert": false,
+      "init_temperature": 10.0,
+      "init_lambda": 0.5,
+      "init_beta": 2.0,
+      "consistency_passes": 1
+    },
+    "optim": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.001,
+      "weight_decay": 0.01,
+      "warmup_frac": 0.1,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "amp": true,
+      "eval_every": 250,
+      "val_episodes": 60
+    },
+    "threshold_objective": "f1"
+  },
+  "k_shot": 5,
+  "seed": 44,
+  "stem": "psych_mimic4idx",
+  "best_val_auroc_quick": 0.7580555555555555,
+  "best_step": 2750,
+  "locked_threshold": 0.31223902106285095,
+  "val_plan_meta": {
+    "kind": "eval",
+    "split": "val",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 801,
+    "n_repeats": 3,
+    "seed": 1047,
+    "store_fingerprint": "57606f017e267766"
+  },
+  "train_plan_meta": {
+    "kind": "train",
+    "split": "train",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 3000,
+    "seed": 47,
+    "store_fingerprint": "81f23d8f6020e0f2"
+  },
+  "history": [
+    {
+      "step": 250,
+      "val_auroc": 0.5061277777777778,
+      "loss": 0.8684704303741455,
+      "proto_loss": 0.6604040265083313,
+      "aux_loss": 0.693554699420929,
+      "tau": 9.294974327087402,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 500,
+      "val_auroc": 0.5177055555555555,
+      "loss": 0.9015375375747681,
+      "proto_loss": 0.6927387118339539,
+      "aux_loss": 0.695996105670929,
+      "tau": 7.972619533538818,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 750,
+      "val_auroc": 0.5701111111111111,
+      "loss": 0.9204475283622742,
+      "proto_loss": 0.7170539498329163,
+      "aux_loss": 0.677978515625,
+      "tau": 7.49415922164917,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1000,
+      "val_auroc": 0.6549111111111111,
+      "loss": 0.9452694058418274,
+      "proto_loss": 0.7371956706047058,
+      "aux_loss": 0.6935790777206421,
+      "tau": 7.092395305633545,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1250,
+      "val_auroc": 0.7312,
+      "loss": 0.7785550355911255,
+      "proto_loss": 0.6039310097694397,
+      "aux_loss": 0.582080066204071,
+      "tau": 6.977563381195068,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1500,
+      "val_auroc": 0.7398222222222222,
+      "loss": 1.0094705820083618,
+      "proto_loss": 0.720661997795105,
+      "aux_loss": 0.962695300579071,
+      "tau": 6.929299831390381,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 1750,
+      "val_auroc": 0.7510444444444445,
+      "loss": 0.6340041160583496,
+      "proto_loss": 0.48676347732543945,
+      "aux_loss": 0.49080199003219604,
+      "tau": 6.885165691375732,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2000,
+      "val_auroc": 0.7452888888888889,
+      "loss": 0.6471042037010193,
+      "proto_loss": 0.5020700097084045,
+      "aux_loss": 0.48344725370407104,
+      "tau": 6.8265380859375,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2250,
+      "val_auroc": 0.7563111111111112,
+      "loss": 0.8175089359283447,
+      "proto_loss": 0.6533054113388062,
+      "aux_loss": 0.547344982624054,
+      "tau": 6.811108589172363,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2500,
+      "val_auroc": 0.7561777777777777,
+      "loss": 0.6257365942001343,
+      "proto_loss": 0.4881584644317627,
+      "aux_loss": 0.4585937559604645,
+      "tau": 6.809836387634277,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 2750,
+      "val_auroc": 0.7580555555555555,
+      "loss": 0.528767466545105,
+      "proto_loss": 0.4207407534122467,
+      "aux_loss": 0.36008912324905396,
+      "tau": 6.804298400878906,
+      "lambda_decay": null,
+      "beta_consistency": null
+    },
+    {
+      "step": 3000,
+      "val_auroc": 0.7578555555555556,
+      "loss": 1.0254037380218506,
+      "proto_loss": 0.7965584993362427,
+      "aux_loss": 0.7628173828125,
+      "tau": 6.803472518920898,
+      "lambda_decay": null,
+      "beta_consistency": null
+    }
+  ],
+  "device": "cuda",
+  "minutes": 43.1
+}

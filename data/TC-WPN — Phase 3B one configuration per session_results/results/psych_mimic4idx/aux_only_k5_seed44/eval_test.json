@@ -1,0 +1,104 @@
+{
+  "metrics": {
+    "n_patients": 2278,
+    "n_case": 1353,
+    "n_control": 925,
+    "prevalence": 0.5939420544337137,
+    "threshold": 0.31223902106285095,
+    "auroc": 0.7413243842512135,
+    "pr_auc": 0.7892024697717874,
+    "f1_positive": 0.7739438890680426,
+    "f1_macro": 0.6460784737436434,
+    "sensitivity": 0.8869179600886918,
+    "specificity": 0.40756756756756757,
+    "ppv": 0.6864988558352403,
+    "npv": 0.7113207547169811,
+    "brier": 0.20654265015393689,
+    "ece": 0.0762881732226835,
+    "auroc_ci_lower": 0.7214417869845703,
+    "auroc_ci_upper": 0.7612724949256614,
+    "pr_auc_ci_lower": 0.7646153266027298,
+    "pr_auc_ci_upper": 0.8138440066836409,
+    "n_bootstrap_used": 2000,
+    "run": "aux_only_k5_seed44",
+    "split": "test",
+    "k_shot": 5,
+    "seed": 44,
+    "blind": "none",
+    "n_episodes": 813,
+    "mean_episodes_per_patient": 3.57,
+    "query_coverage_fraction": 1.0
+  },
+  "calibration_bins": [
+    {
+      "bin_lo": 0.0,
+      "bin_hi": 0.1,
+      "n": 40,
+      "mean_pred": 0.07665681320863464,
+      "observed_rate": 0.25
+    },
+    {
+      "bin_lo": 0.1,
+      "bin_hi": 0.2,
+      "n": 173,
+      "mean_pred": 0.15435698423552577,
+      "observed_rate": 0.2832369942196532
+    },
+    {
+      "bin_lo": 0.2,
+      "bin_hi": 0.30000000000000004,
+      "n": 282,
+      "mean_pred": 0.25234308167598507,
+      "observed_rate": 0.2765957446808511
+    },
+    {
+      "bin_lo": 0.30000000000000004,
+      "bin_hi": 0.4,
+      "n": 256,
+      "mean_pred": 0.35071881014985895,
+      "observed_rate": 0.48046875
+    },
+    {
+      "bin_lo": 0.4,
+      "bin_hi": 0.5,
+      "n": 290,
+      "mean_pred": 0.4503370158391437,
+      "observed_rate": 0.5586206896551724
+    },
+    {
+      "bin_lo": 0.5,
+      "bin_hi": 0.6000000000000001,
+      "n": 312,
+      "mean_pred": 0.5497687237160122,
+      "observed_rate": 0.6346153846153846
+    },
+    {
+      "bin_lo": 0.6000000000000001,
+      "bin_hi": 0.7000000000000001,
+      "n": 346,
+      "mean_pred": 0.645936253695589,
+      "observed_rate": 0.7196531791907514
+    },
+    {
+      "bin_lo": 0.7000000000000001,
+      "bin_hi": 0.8,
+      "n": 282,
+      "mean_pred": 0.749632321276986,
+      "observed_rate": 0.7978723404255319
+    },
+    {
+      "bin_lo": 0.8,
+      "bin_hi": 0.9,
+      "n": 217,
+      "mean_pred": 0.8460299894785916,
+      "observed_rate": 0.8663594470046083
+    },
+    {
+      "bin_lo": 0.9,
+      "bin_hi": 1.0,
+      "n": 80,
+      "mean_pred": 0.9262949540217719,
+      "observed_rate": 0.8875
+    }
+  ]
+}
