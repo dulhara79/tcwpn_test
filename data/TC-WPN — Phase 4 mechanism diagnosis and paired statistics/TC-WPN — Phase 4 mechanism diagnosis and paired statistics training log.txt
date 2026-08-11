@@ -1,0 +1,400 @@
+TC-WPN — Phase 4: mechanism diagnosis and paired statistics
+Supervisor's Phase 4A/4B. Section 1 needs no GPU at all. Section 2 is inference only on checkpoints you already have — roughly 20 minutes, no training.
+
+Their instruction was explicit: stop the blind training loop and find out whether the mechanisms are doing anything before spending more quota. That is what this notebook is for.
+
+What the five-seed table actually says
+All twenty runs, verified against your four *_seed_results.csv files:
+
+seed	aux_only	temporal_aux	pcw_aux	tcwpn_full
+42	0.7432	0.7362	0.7208	0.7379
+43	0.7233	0.7386	0.7261	0.7394
+44	0.7413	0.7363	0.7374	0.7386
+45	0.7413	0.7344	0.7386	0.7403
+46	0.7364	0.7428	0.7227	0.7323
+mean	0.7371	0.7377	0.7291	0.7377
+SD	0.0081	0.0032	0.0083	0.0031
+Because every configuration ran on the same five seeds against the same frozen episode plans, these are paired and the per-seed differences are the right statistic — not the difference of means.
+
+Paired differences against aux_only
+config	mean Δ	seeds better	median Δ	paired t p	Cohen's dz
+temporal_aux	+0.0006	2/5	−0.0050	0.906	0.06
+pcw_aux	−0.0080	1/5	−0.0039	0.150	−0.80
+tcwpn_full	+0.0006	1/5	−0.0027	0.886	0.07
+Nothing survives Holm correction across the three comparisons.
+
+The detail that matters most
+tcwpn_full has a positive mean Δ but beats aux_only on only one seed out of five, and its median Δ is negative. The positive mean comes entirely from seed 43, where aux_only returned 0.7233 — its own worst run, against a mean of 0.7406 across its other four seeds.
+
+Leave-one-seed-out confirms it:
+
+drop seed 42:  Δ = +0.0021
+drop seed 43:  Δ = -0.0033      <- the sign flips
+drop seed 44:  Δ = +0.0014
+drop seed 45:  Δ = +0.0010
+drop seed 46:  Δ = +0.0018
+all five    :  Δ = +0.0006
+So the entire apparent advantage of TC-WPN rests on one unlucky baseline run. Report it that way; a reviewer who has the per-seed table will notice.
+
+The 95% CI on the paired difference is [−0.0103, +0.0115]. That is a useful sentence for the paper: it bounds any true effect below +0.012, which is smaller than one bootstrap CI half-width (0.020).
+
+The one place the mechanisms do something
+SD falls from 0.0081 (aux_only) to 0.0031 (tcwpn_full) — a variance ratio of 6.6. With n=5 per group this is underpowered (F-test p = 0.094, Levene p = 0.416), so it is a hypothesis worth stating, not a claim. If it holds up, "the weighting mechanisms stabilise training without improving discrimination" is a real and honest finding.
+
+!rm -rf /kaggle/working/tcwpn_test
+!git clone -q https://github.com/dulhara79/tcwpn_test.git /kaggle/working/tcwpn_test
+%cd /kaggle/working/tcwpn_test
+!pip install -q -r requirements.txt 2>&1 | tail -2
+import os
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"]="1"; os.environ["TRANSFORMERS_VERBOSITY"]="error"
+os.environ["TOKENIZERS_PARALLELISM"]="false"; os.environ["PYTHONPATH"]="src"
+print("ready")
+/kaggle/working/tcwpn_test
+ready
+1. Paired statistics — no GPU needed
+Reads the four seed CSVs from your result datasets and reproduces the tables above so they are generated rather than transcribed.
+
+import glob, os, math
+import pandas as pd, numpy as np
+from scipy import stats
+
+# The seed_results CSVs ARE committed to GitHub, so the cloned repo is the
+# most reliable source. Fall back to /kaggle/input if the repo copy is absent.
+hits = glob.glob("/kaggle/working/tcwpn_test/**/*_seed_results.csv", recursive=True)
+if not hits:
+    hits = glob.glob("/kaggle/input/**/*_seed_results.csv", recursive=True)
+print(f"found {len(hits)} seed-result files")
+data = {}
+for f in hits:
+    cfg = os.path.basename(f).replace("_seed_results.csv", "")
+    d = pd.read_csv(f)
+    d["seed"] = d["run"].str.extract(r"seed(\d+)").astype(int)
+    data[cfg] = d.set_index("seed").sort_index()
+
+ORDER = [c for c in ["aux_only", "temporal_aux", "pcw_aux", "tcwpn_full"] if c in data]
+if len(ORDER) < 2:
+    raise SystemExit(f"found only {list(data)}; add the Phase 3B result datasets as inputs")
+
+A = pd.DataFrame({c: data[c]["AUROC"] for c in ORDER})
+print("PER-SEED AUROC"); print(A.round(4).to_string()); print()
+
+rows = []
+for c in ORDER:
+    a = A[c]; nn = len(a); sd = a.std(ddof=1); se = sd/math.sqrt(nn)
+    t = stats.t.ppf(0.975, nn-1)
+    rows.append({"config": c, "mean": round(a.mean(),4), "SD": round(sd,4),
+                 "CI95_low": round(a.mean()-t*se,4), "CI95_high": round(a.mean()+t*se,4)})
+summary = pd.DataFrame(rows)
+print(summary.to_string(index=False)); print()
+
+if "aux_only" in A:
+    base = A["aux_only"]; out = []
+    for c in ORDER:
+        if c == "aux_only": continue
+        d = A[c] - base
+        _, p_t = stats.ttest_rel(A[c], base)
+        try: p_w = stats.wilcoxon(A[c], base).pvalue
+        except Exception: p_w = float("nan")
+        out.append({"config": c, "mean_delta": round(d.mean(),4),
+                    "median_delta": round(d.median(),4),
+                    "seeds_better": f"{int((d>0).sum())}/{len(d)}",
+                    "paired_t_p": round(p_t,4),
+                    "wilcoxon_p": round(p_w,4) if p_w == p_w else None,
+                    "cohens_dz": round(d.mean()/d.std(ddof=1),3)})
+    delta = pd.DataFrame(out)
+    print("PAIRED DIFFERENCES vs aux_only"); print(delta.to_string(index=False)); print()
+
+    ps = delta.sort_values("paired_t_p")[["config","paired_t_p"]].values
+    m = len(ps); still = True
+    print("HOLM step-down:")
+    for i,(c,p) in enumerate(ps):
+        thr = 0.05/(m-i); still = still and (p <= thr)
+        print(f"  {c:<14} p={p:.4f}  thr={thr:.4f}  {'SIGNIFICANT' if still else 'not significant'}")
+
+    print("\nLEAVE-ONE-SEED-OUT (tcwpn_full - aux_only):")
+    if "tcwpn_full" in A:
+        for s in A.index:
+            sub = A.drop(index=s)
+            print(f"  drop seed {s}: {sub['tcwpn_full'].mean()-sub['aux_only'].mean():+.4f}")
+
+    summary.to_csv("/kaggle/working/phase4_summary.csv", index=False)
+    delta.to_csv("/kaggle/working/phase4_paired_deltas.csv", index=False)
+found 4 seed-result files
+PER-SEED AUROC
+      aux_only  temporal_aux  pcw_aux  tcwpn_full
+seed                                             
+42      0.7432        0.7362   0.7208      0.7379
+43      0.7233        0.7386   0.7261      0.7394
+44      0.7413        0.7363   0.7374      0.7386
+45      0.7413        0.7344   0.7386      0.7403
+46      0.7364        0.7428   0.7227      0.7323
+
+      config   mean     SD  CI95_low  CI95_high
+    aux_only 0.7371 0.0081    0.7270     0.7472
+temporal_aux 0.7377 0.0032    0.7336     0.7417
+     pcw_aux 0.7291 0.0083    0.7188     0.7395
+  tcwpn_full 0.7377 0.0031    0.7338     0.7416
+
+PAIRED DIFFERENCES vs aux_only
+      config  mean_delta  median_delta seeds_better  paired_t_p  wilcoxon_p  cohens_dz
+temporal_aux      0.0006       -0.0050          2/5      0.9058      1.0000      0.056
+     pcw_aux     -0.0080       -0.0039          1/5      0.1495      0.1875     -0.797
+  tcwpn_full      0.0006       -0.0027          1/5      0.8864      0.6250      0.068
+
+HOLM step-down:
+  pcw_aux        p=0.1495  thr=0.0167  not significant
+  tcwpn_full     p=0.8864  thr=0.0250  not significant
+  temporal_aux   p=0.9058  thr=0.0500  not significant
+
+LEAVE-ONE-SEED-OUT (tcwpn_full - aux_only):
+  drop seed 42: +0.0021
+  drop seed 43: -0.0033
+  drop seed 44: +0.0014
+  drop seed 45: +0.0010
+  drop seed 46: +0.0018
+2. Mechanism diagnosis — inference only
+The decisive measurement. Both weights are normalised across the K=5 support notes, so the uninformative solution is w = (0.2, 0.2, 0.2, 0.2, 0.2). Normalised entropy H(w)/log K is 1.000 when exactly uniform.
+
+Calibration of that scale, computed directly:
+
+weights	H_norm	max/min
+perfectly uniform	1.00000	1.00
+1% deviation	0.99998	1.02
+10% deviation	0.99844	1.22
+one note dominates (0.6)	0.76271	6.00
+So H_norm > 0.999 means the mechanism is inert — and that alone would explain temporal_aux ≈ tcwpn_full ≈ aux_only.
+
+Needs the seed-42 checkpoints, which Phase 3B retained for each configuration. Add all four result datasets as inputs.
+
+from pathlib import Path
+import glob, os, shutil
+
+STEM, K, SEED = "psych_mimic4idx", 5, 42
+STAGE_A = next((c for c in Path("/kaggle/input").rglob("plans")
+                if (c.parent/"pkl").exists()), None)
+if STAGE_A is None:
+    raise SystemExit("Stage A dataset not found")
+STAGE_A = STAGE_A.parent
+PKL_DIR, PLAN_DIR = "/kaggle/working/pkl", str(STAGE_A/"plans")
+!mkdir -p {PKL_DIR}
+!cp {STAGE_A}/pkl/*.pkl {PKL_DIR}/
+
+RESULTS = "/kaggle/working/results"
+# best.pt and predictions_test.csv are BOTH in .gitignore, so the cloned repo
+# cannot supply them. They exist only in the Phase 3B Kaggle sessions.
+# Add those four notebook outputs as inputs: + Add Input -> Your Work -> Notebook Output.
+found = {}
+for cfg in ORDER:
+    name = f"{cfg}_k{K}_seed{SEED}"
+    hits = glob.glob(f"/kaggle/input/**/{name}/best.pt", recursive=True)
+    if not hits:
+        print(f"no checkpoint for {cfg} -- add its Phase 3B notebook output as an input")
+        continue
+    src = os.path.dirname(sorted(hits)[0])
+    dst = f"{RESULTS}/{STEM}/{name}"
+    os.makedirs(dst, exist_ok=True)
+    for f in os.listdir(src):
+        p = os.path.join(src, f)
+        if os.path.isfile(p): shutil.copy2(p, dst)
+    found[cfg] = dst
+    print(f"imported {cfg}")
+print("\navailable:", list(found))
+if not found:
+    print()
+    print("NOTHING FOUND. best.pt is gitignored, so the repo clone cannot")
+    print("provide it. In the notebook editor: + Add Input -> Your Work ->")
+    print("Notebook Output, and pick each committed Phase 3B run.")
+imported aux_only
+imported temporal_aux
+imported pcw_aux
+imported tcwpn_full
+
+available: ['aux_only', 'temporal_aux', 'pcw_aux', 'tcwpn_full']
+REF = found.get("aux_only")
+for cfg, run in found.items():
+    print("=" * 74)
+    if cfg == "aux_only" or REF is None:
+        !python -m scripts.analyse_mechanisms --run {run} \
+            --pkl-dir {PKL_DIR} --plan-dir {PLAN_DIR} \
+            --split test --episodes 300 \
+            --out /kaggle/working/mechanism_{cfg}.json
+    else:
+        !python -m scripts.analyse_mechanisms --run {run} --reference {REF} \
+            --pkl-dir {PKL_DIR} --plan-dir {PLAN_DIR} \
+            --split test --episodes 300 \
+            --out /kaggle/working/mechanism_{cfg}.json
+==========================================================================
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+aux_only_k5_seed42  preset=aux_only  K=5  300 test episodes
+
+  ...100/300
+  ...200/300
+  ...300/300
+
+==========================================================================
+MECHANISM DIAGNOSIS — aux_only_k5_seed42
+==========================================================================
+  uniform weight at K=5: 0.2000
+
+  normalised_entropy                 mean   1.00000   sd 0.00000   p05 1.00000  p95 1.00000
+  weight_cv                          mean   0.00000   sd 0.00000   p05 0.00000  p95 0.00000
+  weight_max_over_min                mean   1.00000   sd 0.00000   p05 1.00000  p95 1.00000
+  weight_min                         mean   0.20000   sd 0.00000   p05 0.20000  p95 0.20000
+  weight_max                         mean   0.20000   sd 0.00000   p05 0.20000  p95 0.20000
+
+--------------------------------------------------------------------------
+READING
+--------------------------------------------------------------------------
+  normalised entropy 1.00000  (1.000 = perfectly uniform)
+    -> the weights are uniform to three decimals. The mechanism
+       cannot be moving the prototype, and an AUROC equal to the
+       unweighted model is the expected result, not a surprise.
+  largest/smallest support weight 1.000  (1.0 = all equal)
+
+wrote /kaggle/working/mechanism_aux_only.json
+==========================================================================
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+temporal_aux_k5_seed42  preset=temporal_aux  K=5  300 test episodes
+
+  ...100/300
+  ...200/300
+  ...300/300
+
+==========================================================================
+MECHANISM DIAGNOSIS — temporal_aux_k5_seed42
+==========================================================================
+  uniform weight at K=5: 0.2000
+
+  normalised_entropy                 mean   0.94679   sd 0.07150   p05 0.80833  p95 1.00000
+  weight_cv                          mean   0.25666   sd 0.24967   p05 0.00008  p95 0.69313
+  weight_max_over_min                mean  14.96056   sd 38.63425   p05 1.00021  p95 91.47977
+  weight_min                         mean   0.11254   sd 0.07792   p05 0.00356  p95 0.19998
+  weight_max                         mean   0.23691   sd 0.04842   p05 0.20002  p95 0.31606
+  corr_weight_vs_days_before_index   mean  -0.99248   sd 0.02087   p05 -1.00000  p95 -0.94199
+
+  prototype_l2_distance              mean   0.88085   sd 0.01673
+  prototype_cosine                   mean   0.61192   sd 0.01480
+
+--------------------------------------------------------------------------
+READING
+--------------------------------------------------------------------------
+  normalised entropy 0.94679  (1.000 = perfectly uniform)
+    -> the weights are genuinely non-uniform; if AUROC is still
+       unchanged, the reweighting is active but uninformative.
+  largest/smallest support weight 14.961  (1.0 = all equal)
+  corr(weight, days_before_index) = -0.9925
+
+wrote /kaggle/working/mechanism_temporal_aux.json
+==========================================================================
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+pcw_aux_k5_seed42  preset=pcw_aux  K=5  300 test episodes
+
+  ...100/300
+  ...200/300
+  ...300/300
+
+==========================================================================
+MECHANISM DIAGNOSIS — pcw_aux_k5_seed42
+==========================================================================
+  uniform weight at K=5: 0.2000
+
+  normalised_entropy                 mean   0.99813   sd 0.00213   p05 0.99350  p95 0.99993
+  weight_cv                          mean   0.06612   sd 0.03797   p05 0.01463  p95 0.14107
+  weight_max_over_min                mean   1.20942   sd 0.14502   p05 1.04077  p95 1.49269
+  weight_min                         mean   0.17827   sd 0.01424   p05 0.14929  p95 0.19589
+  weight_max                         mean   0.21360   sd 0.00793   p05 0.20315  p95 0.22871
+  corr_weight_vs_days_before_index   mean   0.02010   sd 0.52040   p05 -0.89758  p95 0.72197
+
+  prototype_l2_distance              mean   0.59203   sd 0.01228
+  prototype_cosine                   mean   0.82467   sd 0.00733
+
+--------------------------------------------------------------------------
+READING
+--------------------------------------------------------------------------
+  normalised entropy 0.99813  (1.000 = perfectly uniform)
+    -> weights deviate from uniform by roughly a percent. The
+       prototype shifts, but only slightly.
+  largest/smallest support weight 1.209  (1.0 = all equal)
+  corr(weight, days_before_index) = +0.0201
+    -> the temporal weight is barely tracking recency, which is
+       what it is defined to do. Worth checking lambda.
+
+wrote /kaggle/working/mechanism_pcw_aux.json
+==========================================================================
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+tcwpn_full_k5_seed42  preset=tcwpn_full  K=5  300 test episodes
+
+  ...100/300
+  ...200/300
+  ...300/300
+
+==========================================================================
+MECHANISM DIAGNOSIS — tcwpn_full_k5_seed42
+==========================================================================
+  uniform weight at K=5: 0.2000
+
+  normalised_entropy                 mean   0.94323   sd 0.07457   p05 0.79531  p95 0.99990
+  weight_cv                          mean   0.28222   sd 0.23993   p05 0.01810  p95 0.70579
+  weight_max_over_min                mean  19.37876   sd 52.67871   p05 1.04917  p95 112.15211
+  weight_min                         mean   0.10561   sd 0.07368   p05 0.00264  p95 0.19518
+  weight_max                         mean   0.24811   sd 0.05004   p05 0.20439  p95 0.33712
+  corr_weight_vs_days_before_index   mean  -0.63136   sd 0.55009   p05 -0.99904  p95 0.60854
+
+  prototype_l2_distance              mean   0.93068   sd 0.00617
+  prototype_cosine                   mean   0.56690   sd 0.00575
+
+--------------------------------------------------------------------------
+READING
+--------------------------------------------------------------------------
+  normalised entropy 0.94323  (1.000 = perfectly uniform)
+    -> the weights are genuinely non-uniform; if AUROC is still
+       unchanged, the reweighting is active but uninformative.
+  largest/smallest support weight 19.379  (1.0 = all equal)
+  corr(weight, days_before_index) = -0.6314
+
+wrote /kaggle/working/mechanism_tcwpn_full.json
+import json, glob
+import pandas as pd
+
+rows = []
+for f in sorted(glob.glob("/kaggle/working/mechanism_*.json")):
+    d = json.load(open(f))
+    g = lambda k: round(d[k]["mean"], 5) if d.get(k) else None
+    rows.append({"config": d["preset"],
+                 "H_norm": g("normalised_entropy"),
+                 "weight_cv": g("weight_cv"),
+                 "max/min": g("weight_max_over_min"),
+                 "w_min": g("weight_min"), "w_max": g("weight_max"),
+                 "corr_w_days": g("corr_weight_vs_days_before_index"),
+                 "proto_L2_vs_aux": g("prototype_l2_distance"),
+                 "proto_cos_vs_aux": g("prototype_cosine")})
+if rows:
+    t = pd.DataFrame(rows).set_index("config")
+    print(t.to_string())
+    t.to_csv("/kaggle/working/phase4_mechanism_table.csv")
+    print()
+    print("Uniform weight at K=5 is 0.2000. H_norm = 1.000 means exactly uniform.")
+    print("If H_norm > 0.999 for temporal and PCW, the mechanisms are inert and")
+    print("the flat ablation table is fully explained.")
+               H_norm  weight_cv   max/min    w_min    w_max  corr_w_days  proto_L2_vs_aux  proto_cos_vs_aux
+config                                                                                                      
+aux_only      1.00000    0.00000   1.00000  0.20000  0.20000          NaN              NaN               NaN
+pcw_aux       0.99813    0.06612   1.20942  0.17827  0.21360      0.02010          0.59203           0.82467
+tcwpn_full    0.94323    0.28222  19.37876  0.10561  0.24811     -0.63136          0.93068           0.56690
+temporal_aux  0.94679    0.25666  14.96056  0.11254  0.23691     -0.99248          0.88085           0.61192
+
+Uniform weight at K=5 is 0.2000. H_norm = 1.000 means exactly uniform.
+If H_norm > 0.999 for temporal and PCW, the mechanisms are inert and
+the flat ablation table is fully explained.
+What to conclude, and what not to
+Do not write that TC-WPN improves few-shot anxiety detection. One seed out of five, median Δ negative, p = 0.886, and a sign that flips when seed 43 is dropped. That claim would not survive review.
+
+Do write, if the mechanism table shows near-uniform weights:
+
+Under auxiliary-controlled ablation across five seeds on a patient-disjoint, ICD-labelled cohort with a zero-leakage episode certificate, neither index-relative temporal weighting (Δ = +0.0006, 95% CI [−0.010, +0.012]) nor prototype-consistency weighting (Δ = −0.0080) improved discrimination over the auxiliary-controlled prototypical baseline (AUROC 0.7371 ± 0.0081). Weight diagnostics show the learned support weights remained close to uniform (normalised entropy ≈ H), indicating the mechanisms did not materially alter prototype construction.
+
+That is a complete, honest, publishable result. The contribution is the leakage-controlled evaluation framework plus the negative finding, which is exactly what your supervisor identified in their section 19.
+
+Also report the blinding gap, which they call the biggest warning: 0.7379 → 0.6284 under anxiety-term blinding. Measured against the above-chance margin that is 0.2379 → 0.1284, so roughly 46% of the signal was lexical. Note too that adding medication terms changed almost nothing (0.6284 vs 0.6291), meaning the drug names carried no signal beyond the diagnosis words.
+
+Do not start editing the architecture until this table exists. If the weights turn out to be uniform, the fix is obvious and cheap. If they are non-uniform but uninformative, that is a different problem with a different fix. Guessing between them costs GPU hours you have already spent once.

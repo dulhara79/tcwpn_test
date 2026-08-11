@@ -1,0 +1,4 @@
+config,mean_delta,median_delta,seeds_better,paired_t_p,wilcoxon_p,cohens_dz
+temporal_aux,0.0006,-0.005,2/5,0.9058,1.0,0.056
+pcw_aux,-0.008,-0.0039,1/5,0.1495,0.1875,-0.797
+tcwpn_full,0.0006,-0.0027,1/5,0.8864,0.625,0.068
