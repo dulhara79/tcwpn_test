@@ -1,0 +1,742 @@
+TC-WPN — Phase 3B: one configuration per session¶
+Accelerator: GPU T4. Run this FOUR times, changing CONFIG each time. Always via Save Version → Save & Run All (Commit). Never interactively.
+
+What went wrong with Phase 3A
+Three separate problems, all of them mine.
+
+1. The job did not fit in a session. 20 runs at ~48 min is 16 hours against a 12-hour cap. I wrote that number in the notebook and then still wrote a single cell that attempts all 20 in one pass. It ran until Kaggle killed it.
+
+2. The output directory reached roughly 8.6 GB. train.py writes a ~440 MB best.pt per run, and nothing deleted them. Twenty checkpoints in /kaggle/working makes committing extremely slow and makes the notebook's output listing very heavy to render — the most likely reason the page will not load now.
+
+3. Interactive sessions lose /kaggle/working when they time out. If Phase 3A was run interactively rather than committed, the outputs were not saved. See the recovery section at the bottom before assuming the 12 hours are gone.
+
+What changed here
+One configuration per session. 5 seeds × ~48 min ≈ 4 hours, comfortably inside the cap with headroom for a slow T4.
+Checkpoints are deleted after evaluation, except for the seed used in DeLong pairing and blinded evaluation. Output drops from ~8.6 GB to a few hundred MB.
+Subprocess output goes to a log file, with only the tail printed. The notebook JSON stays small enough to open.
+Fully resumable. Anything already evaluated is skipped.
+# ===========================================================================
+# SET THIS, THEN COMMIT. Run once per value:
+#     "aux_only"  ->  "temporal_aux"  ->  "pcw_aux"  ->  "tcwpn_full"
+# ===========================================================================
+# CONFIG = "aux_only"
+# CONFIG = "temporal_aux"
+# CONFIG = "pcw_aux"
+CONFIG = "tcwpn_full"
+
+SEEDS          = [42, 43, 44, 45, 46]
+KEEP_CKPT_SEED = 42      # only this seed's best.pt survives, for DeLong + blinding
+K              = 5
+STEM           = "psych_mimic4idx"
+print("this session trains:", CONFIG, "seeds", SEEDS)
+this session trains: tcwpn_full seeds [42, 43, 44, 45, 46]
+!rm -rf /kaggle/working/tcwpn_test
+!git clone -q https://github.com/dulhara79/tcwpn_test.git /kaggle/working/tcwpn_test
+%cd /kaggle/working/tcwpn_test
+!pip install -q -r requirements.txt 2>&1 | tail -2
+
+import os
+# Quieten the libraries that generate most of the notebook's output volume.
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTHONPATH"] = "src"
+
+import subprocess, sys
+r = subprocess.run([sys.executable, "-m", "pytest",
+                    "tests/test_repo_layout.py", "tests/test_call_arity.py",
+                    "-q", "--no-header"],
+                   capture_output=True, text=True, env=os.environ)
+print(r.stdout[-1500:])
+if r.returncode != 0:
+    raise SystemExit("Repository layout is broken — fix before spending GPU time.")
+/kaggle/working/tcwpn_test
+.......................................................                  [100%]
+55 passed in 0.18s
+
+from pathlib import Path
+STAGE_A_DS = Path("/kaggle/input/datasets/nightwatch117/tc-wpn-stage-a-data")
+STAGE_A = next((c for c in (STAGE_A_DS/"data"/"clean", STAGE_A_DS/"clean", STAGE_A_DS)
+                if (c/"pkl").exists()), None)
+if STAGE_A is None:
+    raise SystemExit(f"no pkl/ under {STAGE_A_DS}")
+
+PKL_DIR  = "/kaggle/working/pkl"
+PLAN_DIR = str(STAGE_A/"plans")
+RESULTS  = "/kaggle/working/results"
+LOGS     = "/kaggle/working/logs"
+!mkdir -p {PKL_DIR} {LOGS}
+!cp {STAGE_A}/pkl/*.pkl {PKL_DIR}/
+
+# Blinded PKLs may live in a SEPARATE dataset (Stage A2), because the original
+# Stage A run did not produce them. Pull in any blinded variant found in any
+# input, so the blinded evaluation cell can find them later.
+import glob, shutil, os
+for src in glob.glob("/kaggle/input/**/*_blind-*.pkl", recursive=True):
+    dst = os.path.join(PKL_DIR, os.path.basename(src))
+    if not os.path.exists(dst):
+        shutil.copy2(src, dst)
+        print("imported blinded pkl:", os.path.basename(src))
+
+print("\npkl directory:")
+for f in sorted(os.listdir(PKL_DIR)):
+    print("  ", f)
+print("ready")
+imported blinded pkl: psych_mimic4idx_val_blind-anx_meds.pkl
+imported blinded pkl: psych_mimic4idx_test_blind-anx_meds.pkl
+imported blinded pkl: psych_mimic4idx_test_blind-anxiety.pkl
+imported blinded pkl: psych_mimic4idx_train_blind-anxiety.pkl
+imported blinded pkl: psych_mimic4idx_val_blind-anxiety.pkl
+imported blinded pkl: psych_mimic4idx_train_blind-anx_meds.pkl
+
+pkl directory:
+   psych_mimic4idx_test.pkl
+   psych_mimic4idx_test_blind-anx_meds.pkl
+   psych_mimic4idx_test_blind-anxiety.pkl
+   psych_mimic4idx_train.pkl
+   psych_mimic4idx_train_blind-anx_meds.pkl
+   psych_mimic4idx_train_blind-anxiety.pkl
+   psych_mimic4idx_val.pkl
+   psych_mimic4idx_val_blind-anx_meds.pkl
+   psych_mimic4idx_val_blind-anxiety.pkl
+ready
+Preflight
+Supervisor's Stage 2. Everything below is verified before a single GPU minute is spent, and the cell refuses to continue if any hard check fails. The leakage rate is read from the certificate rather than assumed — the point of the certificate is that it gets checked, not filed.
+
+Note the budget rule: the stop threshold is 9 hours, not 11. A loaded T4 can run well over 48 min/seed, and being killed at the cap is exactly what cost the last session.
+
+# ===========================================================================
+# PREFLIGHT — hard gate before any training
+# ===========================================================================
+import os, json, glob, shutil, math
+from pathlib import Path
+
+# Disk requirement is DERIVED from the checkpoint policy, not guessed.
+# The earlier hardcoded 25 GB came from Phase 3A, which retained all 20
+# checkpoints (~8.6 GB). Phase 3B keeps exactly one, so the requirement is
+# far smaller -- and 25 GB could never pass anyway, because /kaggle/working
+# is around 20 GB in total.
+CKPT_GB         = 0.45   # Bio_ClinicalBERT encoder + projection, fp32
+HF_CACHE_GB     = 1.0    # model downloaded once per session
+ARTEFACT_GB     = 0.05   # eval json + predictions csv + logs, all runs
+MARGIN_GB       = 2.0
+N_KEPT_CKPT     = 1      # KEEP_CKPT_SEED only
+MIN_FREE_GB     = (N_KEPT_CKPT + 1) * CKPT_GB + HF_CACHE_GB + ARTEFACT_GB + MARGIN_GB
+
+EST_MIN_PER_RUN = 48
+STOP_AFTER_H    = 9.0    # deliberately below the 12 h cap
+
+checks, hard_fail = [], False
+
+def chk(label, ok, detail="", fatal=True):
+    global hard_fail
+    checks.append((label, ok, detail, fatal))
+    if fatal and not ok:
+        hard_fail = True
+    return ok
+
+# --- repository -----------------------------------------------------------
+import subprocess, sys
+r = subprocess.run([sys.executable, "-m", "pytest",
+                    "tests/test_repo_layout.py", "tests/test_call_arity.py",
+                    "-q", "--no-header"],
+                   capture_output=True, text=True, env=os.environ)
+chk("repository tests", r.returncode == 0,
+    r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "")
+
+# --- config ---------------------------------------------------------------
+cfg_path = f"configs/{CONFIG}.yaml"
+chk("configuration file", os.path.exists(cfg_path), cfg_path)
+
+# --- Stage A artefacts ----------------------------------------------------
+chk("Stage-A dataset", STAGE_A is not None and Path(STAGE_A).exists(), str(STAGE_A))
+
+pkls = sorted(glob.glob(f"{PKL_DIR}/{STEM}_*.pkl"))
+need_pkl = [f"{STEM}_{s}.pkl" for s in ("train", "val", "test")]
+have_pkl = {os.path.basename(x) for x in pkls}
+chk("PKL files", all(n in have_pkl for n in need_pkl),
+    f"{len(pkls)} found; missing {[n for n in need_pkl if n not in have_pkl]}")
+
+need_plan = [f"{STEM}_{s}_k{K}.json" for s in ("train", "val", "test")]
+missing_plan = [n for n in need_plan if not os.path.exists(f"{PLAN_DIR}/{n}")]
+chk("episode plans", not missing_plan, f"missing {missing_plan}" if missing_plan else "train/val/test present")
+
+# --- leakage certificate --------------------------------------------------
+cert_path = f"{PLAN_DIR}/leakage_certificate_{STEM}.json"
+leak_detail, leak_ok = "not found", False
+if os.path.exists(cert_path):
+    cert = json.load(open(cert_path))
+    per_k = cert.get("per_k", {}).get(str(K), {})
+    rates = {split: blk.get("leakage_rate")
+             for split, blk in per_k.items() if isinstance(blk, dict)}
+    leak_ok = bool(rates) and all(v == 0 for v in rates.values())
+    leak_detail = "  ".join(f"{s}={v:.4%}" for s, v in rates.items()) or "no K entry"
+chk("leakage certificate", os.path.exists(cert_path), cert_path)
+chk(f"K={K} leakage == 0", leak_ok, leak_detail)
+
+# --- disk -----------------------------------------------------------------
+free_gb = shutil.disk_usage("/kaggle/working").free / 1024**3
+chk("disk space", free_gb >= MIN_FREE_GB,
+    f"{free_gb:.1f} GB free; need {MIN_FREE_GB:.1f} GB "
+    f"({N_KEPT_CKPT+1} x {CKPT_GB} GB checkpoints + {HF_CACHE_GB} GB cache "
+    f"+ {MARGIN_GB} GB margin)")
+
+# --- secrets --------------------------------------------------------------
+secret_like = [f for f in glob.glob("**/*", recursive=True)
+               if os.path.isfile(f)
+               and os.path.basename(f) in {".env", "kaggle.json", "credentials.json"}]
+chk("no secret files in repo", not secret_like, str(secret_like), fatal=False)
+
+# --- existing results -----------------------------------------------------
+existing = sum(1 for s in SEEDS
+               if os.path.exists(f"{RESULTS}/{STEM}/{CONFIG}_k{K}_seed{s}/eval_test.json"))
+remaining = len(SEEDS) - existing
+est_h = remaining * EST_MIN_PER_RUN / 60
+chk("runtime within budget", est_h <= STOP_AFTER_H,
+    f"~{est_h:.1f} h for {remaining} run(s); stop threshold {STOP_AFTER_H} h", fatal=False)
+
+# ===========================================================================
+print("=" * 60)
+print("TC-WPN PHASE 3B PREFLIGHT")
+print("=" * 60)
+print()
+print(f"Configuration: {CONFIG}")
+print(f"Seeds:         {','.join(str(s) for s in SEEDS)}")
+print(f"K-shot:        {K}")
+print()
+for label, ok, detail, fatal in checks:
+    mark = "OK  " if ok else ("FAIL" if fatal else "WARN")
+    print(f"  {label:<26} {mark}   {detail}")
+print()
+print(f"Existing runs:       {existing}")
+print(f"Runs remaining:      {remaining}")
+print(f"Estimated runtime:   ~{est_h:.1f} h")
+print()
+print("Checkpoint policy:")
+for s in SEEDS:
+    print(f"  seed {s} -> {'KEEP' if s == KEEP_CKPT_SEED else 'DELETE after evaluation'}")
+print()
+if hard_fail:
+    print("STATUS: BLOCKED — fix the FAIL rows above before starting")
+    print("=" * 60)
+    raise SystemExit("preflight failed")
+if est_h > STOP_AFTER_H:
+    print(f"STATUS: SAFE TO START, BUT split the seeds across two commits")
+    print(f"        (~{est_h:.1f} h exceeds the {STOP_AFTER_H} h stop threshold)")
+else:
+    print("STATUS: SAFE TO START")
+print("=" * 60)
+============================================================
+TC-WPN PHASE 3B PREFLIGHT
+============================================================
+
+Configuration: tcwpn_full
+Seeds:         42,43,44,45,46
+K-shot:        5
+
+  repository tests           OK     55 passed in 0.18s
+  configuration file         OK     configs/tcwpn_full.yaml
+  Stage-A dataset            OK     /kaggle/input/datasets/nightwatch117/tc-wpn-stage-a-data/clean
+  PKL files                  OK     9 found; missing []
+  episode plans              OK     train/val/test present
+  leakage certificate        OK     /kaggle/input/datasets/nightwatch117/tc-wpn-stage-a-data/clean/plans/leakage_certificate_psych_mimic4idx.json
+  K=5 leakage == 0           OK     val=0.0000%  test=0.0000%  train_stress=0.0000%
+  disk space                 OK     19.3 GB free; need 4.0 GB (2 x 0.45 GB checkpoints + 1.0 GB cache + 2.0 GB margin)
+  no secret files in repo    OK     []
+  runtime within budget      OK     ~4.0 h for 5 run(s); stop threshold 9.0 h
+
+Existing runs:       0
+Runs remaining:      5
+Estimated runtime:   ~4.0 h
+
+Checkpoint policy:
+  seed 42 -> KEEP
+  seed 43 -> DELETE after evaluation
+  seed 44 -> DELETE after evaluation
+  seed 45 -> DELETE after evaluation
+  seed 46 -> DELETE after evaluation
+
+STATUS: SAFE TO START
+============================================================
+Recover anything that already exists
+Add every previous result dataset as an input. Predictions files are preferred over checkpoints: DeLong needs the score vectors, not the model.
+
+import glob, shutil, os
+import pandas as pd
+
+# Four distinct states, per the supervisor's point 2. The previous version
+# conflated "predictions recovered" with "ready", so a run holding only a
+# predictions CSV was skipped by the training loop AND had no eval_test.json,
+# leaving it invisible to aggregation.
+#
+#   complete       eval_test.json + predictions_test.csv   -> nothing to do
+#   predictions    predictions_test.csv only               -> usable for DeLong,
+#                                                             NOT for mean+/-SD
+#   checkpoint     best.pt only                            -> re-evaluate (cheap)
+#   missing        nothing                                 -> train (expensive)
+
+def classify(cfg, seed):
+    name = f"{cfg}_k{K}_seed{seed}"
+    dst  = f"{RESULTS}/{STEM}/{name}"
+    has_eval = os.path.exists(f"{dst}/eval_test.json")
+    has_pred = os.path.exists(f"{dst}/predictions_test.csv")
+    has_ckpt = os.path.exists(f"{dst}/best.pt")
+
+    if not (has_eval or has_pred or has_ckpt):
+        for target in ("eval_test.json", "predictions_test.csv", "best.pt"):
+            hits = glob.glob(f"/kaggle/input/**/{name}/{target}", recursive=True)
+            if hits:
+                src = os.path.dirname(sorted(hits)[0])
+                os.makedirs(dst, exist_ok=True)
+                for f in os.listdir(src):
+                    q = os.path.join(src, f)
+                    if os.path.isfile(q):
+                        shutil.copy2(q, dst)
+                break
+        has_eval = os.path.exists(f"{dst}/eval_test.json")
+        has_pred = os.path.exists(f"{dst}/predictions_test.csv")
+        has_ckpt = os.path.exists(f"{dst}/best.pt")
+
+    if has_eval and has_pred:
+        return "complete"
+    if has_ckpt:
+        return "checkpoint"      # re-evaluate; regenerates both artefacts
+    if has_pred:
+        return "predictions"     # DeLong-usable only
+    return "missing"
+
+status = {s: classify(CONFIG, s) for s in SEEDS}
+print(pd.Series(status, name="state").to_string())
+print()
+
+counts = {k: sum(1 for v in status.values() if v == k) for k in
+          ("complete", "checkpoint", "predictions", "missing")}
+print(f"complete    : {counts['complete']}   nothing to do")
+print(f"checkpoint  : {counts['checkpoint']}   re-evaluate (~2 min each)")
+print(f"predictions : {counts['predictions']}   DeLong-usable, but NO metrics -> retrain for mean+/-SD")
+print(f"missing     : {counts['missing']}   train (~48 min each)")
+
+to_train = counts["missing"] + counts["predictions"]
+print(f"\nGPU work this session: ~{to_train*48/60:.1f} h")
+if counts["predictions"]:
+    print("\nNOTE: a predictions-only run contributes to the paired DeLong test but")
+    print("      cannot contribute to the mean +/- SD table, because eval_test.json")
+    print("      holds the metrics. Those seeds are retrained below.")
+42    complete
+43     missing
+44     missing
+45     missing
+46     missing
+
+complete    : 1   nothing to do
+checkpoint  : 0   re-evaluate (~2 min each)
+predictions : 0   DeLong-usable, but NO metrics -> retrain for mean+/-SD
+missing     : 4   train (~48 min each)
+
+GPU work this session: ~3.2 h
+Train, evaluate, then free the disk
+Each run's stdout goes to /kaggle/working/logs/. Only the last 25 lines print, which is enough to see the loss trajectory and the locked threshold without inflating the notebook. The full log is committed with the output if you need it.
+
+import subprocess, os, time, shutil
+
+def run(cmd, logfile, tail=25):
+    t0 = time.time()
+    with open(logfile, "w") as fh:
+        p = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, env=os.environ)
+    mins = (time.time() - t0) / 60
+    lines = open(logfile).read().splitlines()
+    print("\n".join(lines[-tail:]))
+    print(f"[exit {p.returncode} | {mins:.1f} min | full log: {logfile}]")
+    return p.returncode
+
+session_start = time.time()
+
+for seed in SEEDS:
+    free_now = shutil.disk_usage("/kaggle/working").free / 1024**3
+    if free_now < CKPT_GB + 1.0:
+        print(f"\nSTOPPING: only {free_now:.1f} GB free, and a checkpoint needs "
+              f"{CKPT_GB} GB. Commit what exists, then resume in a new session.")
+        print(f"Remaining seeds: {[s for s in SEEDS if s >= seed]}")
+        break
+
+    elapsed_h = (time.time() - session_start) / 3600
+    if elapsed_h > STOP_AFTER_H:
+        print(f"\nSTOPPING at {elapsed_h:.1f} h to stay clear of the session cap.")
+        print(f"Remaining seeds: {[s for s in SEEDS if s >= seed]}")
+        print("Commit now, then rerun this notebook — it resumes from here.")
+        break
+
+    name    = f"{CONFIG}_k{K}_seed{seed}"
+    run_dir = f"{RESULTS}/{STEM}/{name}"
+    state   = status[seed]
+
+    if state == "complete":
+        print(f"skip {name}: already complete"); continue
+
+    # 'predictions' has no checkpoint and no metrics -> must retrain.
+    if state == "missing" or state == "predictions":
+        if state == "predictions":
+            print(f"{name}: predictions present but no metrics/checkpoint -> retraining")
+        print("=" * 70); print(f"TRAIN {name}"); print("=" * 70)
+        rc = run(["python", "-m", "scripts.train",
+                  "--config", f"configs/{CONFIG}.yaml",
+                  "--k", str(K), "--seed", str(seed), "--stem", STEM,
+                  "--pkl-dir", PKL_DIR, "--plan-dir", PLAN_DIR,
+                  "--results", RESULTS],
+                 f"{LOGS}/train_{name}.log")
+        if rc != 0:
+            print(f"TRAIN FAILED for {name}; skipping evaluation"); continue
+
+    if not os.path.exists(f"{run_dir}/eval_test.json"):
+        print("-" * 70); print(f"EVALUATE {name}"); print("-" * 70)
+        run(["python", "-m", "scripts.evaluate", "--run", run_dir,
+             "--split", "test", "--pkl-dir", PKL_DIR, "--plan-dir", PLAN_DIR,
+             "--bootstrap", "2000"],
+            f"{LOGS}/eval_{name}.log")
+
+    status[seed] = "complete" if os.path.exists(f"{run_dir}/eval_test.json") else status[seed]
+
+    # Free ~440 MB — but only for seeds that are not needed downstream.
+    if seed != KEEP_CKPT_SEED and os.path.exists(f"{run_dir}/best.pt"):
+        if os.path.exists(f"{run_dir}/eval_test.json") and \
+           os.path.exists(f"{run_dir}/predictions_test.csv"):
+            os.remove(f"{run_dir}/best.pt")
+            print(f"[removed best.pt for seed {seed}: metrics and predictions are saved]")
+        else:
+            print(f"[KEEPING best.pt for seed {seed}: artefacts incomplete]")
+
+!du -sh /kaggle/working/results /kaggle/working/pkl /kaggle/working/logs
+skip tcwpn_full_k5_seed42: already complete
+======================================================================
+TRAIN tcwpn_full_k5_seed43
+======================================================================
+eval[val]:  98%|█████████▊| 783/801 [08:24<00:11,  1.55it/s]
+eval[val]:  98%|█████████▊| 784/801 [08:25<00:11,  1.54it/s]
+eval[val]:  98%|█████████▊| 785/801 [08:25<00:10,  1.55it/s]
+eval[val]:  98%|█████████▊| 786/801 [08:26<00:09,  1.55it/s]
+eval[val]:  98%|█████████▊| 787/801 [08:27<00:09,  1.55it/s]
+eval[val]:  98%|█████████▊| 788/801 [08:27<00:08,  1.55it/s]
+eval[val]:  99%|█████████▊| 789/801 [08:28<00:07,  1.55it/s]
+eval[val]:  99%|█████████▊| 790/801 [08:29<00:07,  1.55it/s]
+eval[val]:  99%|█████████▉| 791/801 [08:29<00:06,  1.55it/s]
+eval[val]:  99%|█████████▉| 792/801 [08:30<00:05,  1.55it/s]
+eval[val]:  99%|█████████▉| 793/801 [08:31<00:05,  1.55it/s]
+eval[val]:  99%|█████████▉| 794/801 [08:31<00:04,  1.55it/s]
+eval[val]:  99%|█████████▉| 795/801 [08:32<00:03,  1.55it/s]
+eval[val]:  99%|█████████▉| 796/801 [08:33<00:03,  1.55it/s]
+eval[val]: 100%|█████████▉| 797/801 [08:33<00:02,  1.55it/s]
+eval[val]: 100%|█████████▉| 798/801 [08:34<00:01,  1.55it/s]
+eval[val]: 100%|█████████▉| 799/801 [08:34<00:01,  1.55it/s]
+eval[val]: 100%|█████████▉| 800/801 [08:35<00:00,  1.54it/s]
+eval[val]: 100%|██████████| 801/801 [08:36<00:00,  1.56it/s]
+eval[val]: 100%|██████████| 801/801 [08:36<00:00,  1.55it/s]
+
+locked threshold from validation: 0.3159
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed43/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed43 --split test
+[exit 0 | 45.1 min | full log: /kaggle/working/logs/train_tcwpn_full_k5_seed43.log]
+----------------------------------------------------------------------
+EVALUATE tcwpn_full_k5_seed43
+----------------------------------------------------------------------
+  "f1_positive": 0.7716484926234766,
+  "f1_macro": 0.6382581823339915,
+  "sensitivity": 0.8891352549889135,
+  "specificity": 0.3924324324324324,
+  "ppv": 0.681586402266289,
+  "npv": 0.7076023391812866,
+  "brier": 0.20745440512326324,
+  "ece": 0.07814107622157891,
+  "auroc_ci_lower": 0.7192111852517868,
+  "auroc_ci_upper": 0.7601264408845315,
+  "pr_auc_ci_lower": 0.766620937577413,
+  "pr_auc_ci_upper": 0.8150035768676757,
+  "n_bootstrap_used": 2000,
+  "run": "tcwpn_full_k5_seed43",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 43,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed43/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed43/predictions_test.csv
+[exit 0 | 9.0 min | full log: /kaggle/working/logs/eval_tcwpn_full_k5_seed43.log]
+[removed best.pt for seed 43: metrics and predictions are saved]
+======================================================================
+TRAIN tcwpn_full_k5_seed44
+======================================================================
+eval[val]:  98%|█████████▊| 783/801 [08:25<00:11,  1.54it/s]
+eval[val]:  98%|█████████▊| 784/801 [08:25<00:11,  1.55it/s]
+eval[val]:  98%|█████████▊| 785/801 [08:26<00:10,  1.54it/s]
+eval[val]:  98%|█████████▊| 786/801 [08:27<00:09,  1.54it/s]
+eval[val]:  98%|█████████▊| 787/801 [08:27<00:09,  1.54it/s]
+eval[val]:  98%|█████████▊| 788/801 [08:28<00:08,  1.54it/s]
+eval[val]:  99%|█████████▊| 789/801 [08:29<00:07,  1.54it/s]
+eval[val]:  99%|█████████▊| 790/801 [08:29<00:07,  1.54it/s]
+eval[val]:  99%|█████████▉| 791/801 [08:30<00:06,  1.54it/s]
+eval[val]:  99%|█████████▉| 792/801 [08:31<00:05,  1.54it/s]
+eval[val]:  99%|█████████▉| 793/801 [08:31<00:05,  1.55it/s]
+eval[val]:  99%|█████████▉| 794/801 [08:32<00:04,  1.55it/s]
+eval[val]:  99%|█████████▉| 795/801 [08:32<00:03,  1.55it/s]
+eval[val]:  99%|█████████▉| 796/801 [08:33<00:03,  1.55it/s]
+eval[val]: 100%|█████████▉| 797/801 [08:34<00:02,  1.54it/s]
+eval[val]: 100%|█████████▉| 798/801 [08:34<00:01,  1.54it/s]
+eval[val]: 100%|█████████▉| 799/801 [08:35<00:01,  1.54it/s]
+eval[val]: 100%|█████████▉| 800/801 [08:36<00:00,  1.55it/s]
+eval[val]: 100%|██████████| 801/801 [08:36<00:00,  1.56it/s]
+eval[val]: 100%|██████████| 801/801 [08:36<00:00,  1.55it/s]
+
+locked threshold from validation: 0.3286
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed44/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed44 --split test
+[exit 0 | 44.9 min | full log: /kaggle/working/logs/train_tcwpn_full_k5_seed44.log]
+----------------------------------------------------------------------
+EVALUATE tcwpn_full_k5_seed44
+----------------------------------------------------------------------
+  "f1_positive": 0.7669933607334809,
+  "f1_macro": 0.6189597097996191,
+  "sensitivity": 0.8965262379896526,
+  "specificity": 0.3545945945945946,
+  "ppv": 0.6701657458563536,
+  "npv": 0.7008547008547008,
+  "brier": 0.20903670874510458,
+  "ece": 0.08390467452566694,
+  "auroc_ci_lower": 0.7177127670803299,
+  "auroc_ci_upper": 0.7590693338794343,
+  "pr_auc_ci_lower": 0.7669558420729933,
+  "pr_auc_ci_upper": 0.8161075346568073,
+  "n_bootstrap_used": 2000,
+  "run": "tcwpn_full_k5_seed44",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 44,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed44/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed44/predictions_test.csv
+[exit 0 | 9.0 min | full log: /kaggle/working/logs/eval_tcwpn_full_k5_seed44.log]
+[removed best.pt for seed 44: metrics and predictions are saved]
+======================================================================
+TRAIN tcwpn_full_k5_seed45
+======================================================================
+eval[val]:  98%|█████████▊| 783/801 [08:25<00:11,  1.55it/s]
+eval[val]:  98%|█████████▊| 784/801 [08:26<00:11,  1.55it/s]
+eval[val]:  98%|█████████▊| 785/801 [08:26<00:10,  1.54it/s]
+eval[val]:  98%|█████████▊| 786/801 [08:27<00:09,  1.54it/s]
+eval[val]:  98%|█████████▊| 787/801 [08:28<00:09,  1.55it/s]
+eval[val]:  98%|█████████▊| 788/801 [08:28<00:08,  1.55it/s]
+eval[val]:  99%|█████████▊| 789/801 [08:29<00:07,  1.54it/s]
+eval[val]:  99%|█████████▊| 790/801 [08:30<00:07,  1.54it/s]
+eval[val]:  99%|█████████▉| 791/801 [08:30<00:06,  1.55it/s]
+eval[val]:  99%|█████████▉| 792/801 [08:31<00:05,  1.54it/s]
+eval[val]:  99%|█████████▉| 793/801 [08:32<00:05,  1.55it/s]
+eval[val]:  99%|█████████▉| 794/801 [08:32<00:04,  1.54it/s]
+eval[val]:  99%|█████████▉| 795/801 [08:33<00:03,  1.54it/s]
+eval[val]:  99%|█████████▉| 796/801 [08:34<00:03,  1.55it/s]
+eval[val]: 100%|█████████▉| 797/801 [08:34<00:02,  1.54it/s]
+eval[val]: 100%|█████████▉| 798/801 [08:35<00:01,  1.54it/s]
+eval[val]: 100%|█████████▉| 799/801 [08:35<00:01,  1.54it/s]
+eval[val]: 100%|█████████▉| 800/801 [08:36<00:00,  1.54it/s]
+eval[val]: 100%|██████████| 801/801 [08:37<00:00,  1.56it/s]
+eval[val]: 100%|██████████| 801/801 [08:37<00:00,  1.55it/s]
+
+locked threshold from validation: 0.3098
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed45/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed45 --split test
+[exit 0 | 44.9 min | full log: /kaggle/working/logs/train_tcwpn_full_k5_seed45.log]
+----------------------------------------------------------------------
+EVALUATE tcwpn_full_k5_seed45
+----------------------------------------------------------------------
+  "f1_positive": 0.7652391372303845,
+  "f1_macro": 0.6059062303690611,
+  "sensitivity": 0.9046563192904656,
+  "specificity": 0.32756756756756755,
+  "ppv": 0.6630552546045504,
+  "npv": 0.7013888888888888,
+  "brier": 0.20653079349650286,
+  "ece": 0.07794624233727673,
+  "auroc_ci_lower": 0.719585878177,
+  "auroc_ci_upper": 0.7613225972675662,
+  "pr_auc_ci_lower": 0.7641358850811343,
+  "pr_auc_ci_upper": 0.8132078817689842,
+  "n_bootstrap_used": 2000,
+  "run": "tcwpn_full_k5_seed45",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 45,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed45/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed45/predictions_test.csv
+[exit 0 | 9.0 min | full log: /kaggle/working/logs/eval_tcwpn_full_k5_seed45.log]
+[removed best.pt for seed 45: metrics and predictions are saved]
+======================================================================
+TRAIN tcwpn_full_k5_seed46
+======================================================================
+eval[val]:  98%|█████████▊| 783/801 [08:25<00:11,  1.54it/s]
+eval[val]:  98%|█████████▊| 784/801 [08:26<00:11,  1.54it/s]
+eval[val]:  98%|█████████▊| 785/801 [08:26<00:10,  1.54it/s]
+eval[val]:  98%|█████████▊| 786/801 [08:27<00:09,  1.54it/s]
+eval[val]:  98%|█████████▊| 787/801 [08:28<00:09,  1.54it/s]
+eval[val]:  98%|█████████▊| 788/801 [08:28<00:08,  1.54it/s]
+eval[val]:  99%|█████████▊| 789/801 [08:29<00:07,  1.54it/s]
+eval[val]:  99%|█████████▊| 790/801 [08:29<00:07,  1.54it/s]
+eval[val]:  99%|█████████▉| 791/801 [08:30<00:06,  1.54it/s]
+eval[val]:  99%|█████████▉| 792/801 [08:31<00:05,  1.54it/s]
+eval[val]:  99%|█████████▉| 793/801 [08:31<00:05,  1.55it/s]
+eval[val]:  99%|█████████▉| 794/801 [08:32<00:04,  1.54it/s]
+eval[val]:  99%|█████████▉| 795/801 [08:33<00:03,  1.55it/s]
+eval[val]:  99%|█████████▉| 796/801 [08:33<00:03,  1.55it/s]
+eval[val]: 100%|█████████▉| 797/801 [08:34<00:02,  1.55it/s]
+eval[val]: 100%|█████████▉| 798/801 [08:35<00:01,  1.55it/s]
+eval[val]: 100%|█████████▉| 799/801 [08:35<00:01,  1.55it/s]
+eval[val]: 100%|█████████▉| 800/801 [08:36<00:00,  1.55it/s]
+eval[val]: 100%|██████████| 801/801 [08:37<00:00,  1.56it/s]
+eval[val]: 100%|██████████| 801/801 [08:37<00:00,  1.55it/s]
+
+locked threshold from validation: 0.3221
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed46/manifest.json
+
+NEXT: python -m scripts.evaluate --run /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed46 --split test
+[exit 0 | 44.9 min | full log: /kaggle/working/logs/train_tcwpn_full_k5_seed46.log]
+----------------------------------------------------------------------
+EVALUATE tcwpn_full_k5_seed46
+----------------------------------------------------------------------
+  "f1_positive": 0.7665615141955836,
+  "f1_macro": 0.6163254901425248,
+  "sensitivity": 0.8980044345898004,
+  "specificity": 0.3491891891891892,
+  "ppv": 0.6686846450192625,
+  "npv": 0.7006507592190889,
+  "brier": 0.2097954904268125,
+  "ece": 0.08124046070747325,
+  "auroc_ci_lower": 0.7123719225578325,
+  "auroc_ci_upper": 0.7528630914714018,
+  "pr_auc_ci_lower": 0.7617768584291672,
+  "pr_auc_ci_upper": 0.8108748845294055,
+  "n_bootstrap_used": 2000,
+  "run": "tcwpn_full_k5_seed46",
+  "split": "test",
+  "k_shot": 5,
+  "seed": 46,
+  "blind": "none",
+  "n_episodes": 813,
+  "mean_episodes_per_patient": 3.57,
+  "query_coverage_fraction": 1.0
+}
+
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed46/eval_test.json
+wrote /kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed46/predictions_test.csv
+[exit 0 | 9.0 min | full log: /kaggle/working/logs/eval_tcwpn_full_k5_seed46.log]
+[removed best.pt for seed 46: metrics and predictions are saved]
+415M	/kaggle/working/results
+162M	/kaggle/working/pkl
+532K	/kaggle/working/logs
+Blinded evaluation — only in the session that keeps the checkpoint
+# Seed 42's checkpoint is retained until ALL of the following exist:
+#   eval_test.json, predictions_test.csv, eval_test_blind-anxiety.json,
+#   eval_test_blind-anx_meds.json
+# Supervisor's point 3: do not delete it before the blinded arms are done.
+run_dir = f"{RESULTS}/{STEM}/{CONFIG}_k{K}_seed{KEEP_CKPT_SEED}"
+
+if os.path.exists(f"{run_dir}/best.pt"):
+    for level in ["anxiety", "anx_meds"]:
+        if os.path.exists(f"{run_dir}/eval_test_blind-{level}.json"):
+            print(f"skip blinded {level}: already done"); continue
+        blind_pkl = f"{PKL_DIR}/{STEM}_test_blind-{level}.pkl"
+        if not os.path.exists(blind_pkl):
+            print(f"MISSING {blind_pkl} — build it in Stage A with "
+                  f"tokenize_cohort --blind {level}"); continue
+        print(f"blinded evaluation: {level}")
+        run(["python", "-m", "scripts.evaluate", "--run", run_dir,
+             "--split", "test", "--blind", level,
+             "--pkl-dir", PKL_DIR, "--plan-dir", PLAN_DIR, "--bootstrap", "2000"],
+            f"{LOGS}/eval_blind_{level}_{CONFIG}.log")
+
+    required = ["eval_test.json", "predictions_test.csv",
+                "eval_test_blind-anxiety.json", "eval_test_blind-anx_meds.json"]
+    have = [f for f in required if os.path.exists(f"{run_dir}/{f}")]
+    print()
+    print(f"seed {KEEP_CKPT_SEED} artefacts: {len(have)}/{len(required)} present")
+    for f in required:
+        print(f"   {'OK ' if f in have else '-- '} {f}")
+    print("\nCheckpoint retained (needed for DeLong pairing and any re-run)."
+          if len(have) < len(required) else
+          "\nAll artefacts present. Checkpoint still retained for DeLong pairing.")
+else:
+    print("no checkpoint retained in this session — nothing to blind")
+skip blinded anxiety: already done
+skip blinded anx_meds: already done
+
+seed 42 artefacts: 4/4 present
+   OK  eval_test.json
+   OK  predictions_test.csv
+   OK  eval_test_blind-anxiety.json
+   OK  eval_test_blind-anx_meds.json
+
+All artefacts present. Checkpoint still retained for DeLong pairing.
+# This session's numbers. The cross-config aggregation happens in Phase 3C,
+# after all four sessions have been committed.
+import json, glob
+rows = []
+for f in sorted(glob.glob(f"{RESULTS}/{STEM}/{CONFIG}_k{K}_seed*/eval_test.json")):
+    m = json.load(open(f))["metrics"]
+    rows.append({"run": os.path.basename(os.path.dirname(f)),
+                 "AUROC": round(m["auroc"], 4),
+                 "CI_low": round(m["auroc_ci_lower"], 4),
+                 "CI_high": round(m["auroc_ci_upper"], 4),
+                 "PR_AUC": round(m["pr_auc"], 4),
+                 "F1": round(m["f1_positive"], 4),
+                 "Sens": round(m["sensitivity"], 4),
+                 "Spec": round(m["specificity"], 4)})
+if rows:
+    df = pd.DataFrame(rows).set_index("run")
+    print(df.to_string())
+    print(f"\nAUROC mean {df['AUROC'].mean():.4f}  SD {df['AUROC'].std(ddof=1):.4f}")
+    df.to_csv(f"/kaggle/working/{CONFIG}_seed_results.csv")
+else:
+    print("no completed runs in this session")
+print("\nNow: Save Version -> Save & Run All (Commit).")
+print("Then change CONFIG and repeat. After all four, run Phase 3C to aggregate.")
+                       AUROC  CI_low  CI_high  PR_AUC      F1    Sens    Spec
+run                                                                          
+tcwpn_full_k5_seed42  0.7379  0.7184   0.7582  0.7923  0.7648  0.9217  0.2854
+tcwpn_full_k5_seed43  0.7394  0.7192   0.7601  0.7906  0.7716  0.8891  0.3924
+tcwpn_full_k5_seed44  0.7386  0.7177   0.7591  0.7917  0.7670  0.8965  0.3546
+tcwpn_full_k5_seed45  0.7403  0.7196   0.7613  0.7886  0.7652  0.9047  0.3276
+tcwpn_full_k5_seed46  0.7323  0.7124   0.7529  0.7861  0.7666  0.8980  0.3492
+
+AUROC mean 0.7377  SD 0.0031
+
+Now: Save Version -> Save & Run All (Commit).
+Then change CONFIG and repeat. After all four, run Phase 3C to aggregate.
+If the Phase 3A page still will not open
+The notebook is probably too large to render, not corrupted. Options in order:
+
+Kaggle API from your own machine — this does not load the page at all:
+
+pip install kaggle
+kaggle kernels output dulharakaushalya/tc-wpn-phase-3-five-seeds-the-completed-delon -p ./phase3a_output
+If Phase 3A was committed, every file it wrote comes down, including any eval_test.json and predictions_test.csv that completed before the cutoff. Those are worth recovering — each one is a run you do not have to repeat.
+
+The notebook's Output tab rather than the editor. It renders the file listing without the cell outputs.
+
+Copy & Edit to fork it. The fork loads a fresh editor; you can then clear all outputs and save.
+
+If Phase 3A ran interactively rather than as a commit, /kaggle/working was discarded when the session was killed and there is nothing to recover. That is the case worth checking first, because it determines whether you restart from zero or from partial results.
+
+Either way, upload whatever you recover as a Kaggle dataset and add it as an input here — the recovery cell will find it.
