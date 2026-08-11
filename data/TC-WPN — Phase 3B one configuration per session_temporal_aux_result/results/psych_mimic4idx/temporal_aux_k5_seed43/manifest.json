@@ -1,0 +1,178 @@
+{
+  "run_name": "temporal_aux_k5_seed43",
+  "config": {
+    "name": "temporal_aux",
+    "description": "ProtoNet + learnable temperature + auxiliary head + index-time recency weight w^T. Isolates delta_temporal with the auxiliary head held constant.\n",
+    "model": {
+      "preset": "temporal_aux",
+      "encoder_name": "emilyalsentzer/Bio_ClinicalBERT",
+      "projection_dim": 256,
+      "freeze_bert": false,
+      "init_temperature": 10.0,
+      "init_lambda": 0.5,
+      "init_beta": 2.0,
+      "consistency_passes": 1
+    },
+    "optim": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.001,
+      "weight_decay": 0.01,
+      "warmup_frac": 0.1,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "amp": true,
+      "eval_every": 250,
+      "val_episodes": 60
+    },
+    "threshold_objective": "f1"
+  },
+  "k_shot": 5,
+  "seed": 43,
+  "stem": "psych_mimic4idx",
+  "best_val_auroc_quick": 0.7304222222222221,
+  "best_step": 2750,
+  "locked_threshold": 0.27947530150413513,
+  "val_plan_meta": {
+    "kind": "eval",
+    "split": "val",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 801,
+    "n_repeats": 3,
+    "seed": 1047,
+    "store_fingerprint": "57606f017e267766"
+  },
+  "train_plan_meta": {
+    "kind": "train",
+    "split": "train",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 3000,
+    "seed": 47,
+    "store_fingerprint": "81f23d8f6020e0f2"
+  },
+  "history": [
+    {
+      "step": 250,
+      "val_auroc": 0.5580666666666666,
+      "loss": 0.8842673301696777,
+      "proto_loss": 0.6773508191108704,
+      "aux_loss": 0.6897217035293579,
+      "tau": 9.149880409240723,
+      "lambda_decay": 0.47656193375587463,
+      "beta_consistency": null
+    },
+    {
+      "step": 500,
+      "val_auroc": 0.5404555555555556,
+      "loss": 0.8494552969932556,
+      "proto_loss": 0.6414914131164551,
+      "aux_loss": 0.6932128667831421,
+      "tau": 7.857425689697266,
+      "lambda_decay": 0.45773789286613464,
+      "beta_consistency": null
+    },
+    {
+      "step": 750,
+      "val_auroc": 0.5302833333333332,
+      "loss": 0.9379866719245911,
+      "proto_loss": 0.7298323512077332,
+      "aux_loss": 0.69384765625,
+      "tau": 7.267024040222168,
+      "lambda_decay": 0.43731728196144104,
+      "beta_consistency": null
+    },
+    {
+      "step": 1000,
+      "val_auroc": 0.5367555555555555,
+      "loss": 0.8566579818725586,
+      "proto_loss": 0.6515358686447144,
+      "aux_loss": 0.6837402582168579,
+      "tau": 6.812924861907959,
+      "lambda_decay": 0.42027491331100464,
+      "beta_consistency": null
+    },
+    {
+      "step": 1250,
+      "val_auroc": 0.5578277777777778,
+      "loss": 0.8909077644348145,
+      "proto_loss": 0.6832954287528992,
+      "aux_loss": 0.6920410394668579,
+      "tau": 6.485262870788574,
+      "lambda_decay": 0.41470393538475037,
+      "beta_consistency": null
+    },
+    {
+      "step": 1500,
+      "val_auroc": 0.5686555555555556,
+      "loss": 0.8769698143005371,
+      "proto_loss": 0.6678633689880371,
+      "aux_loss": 0.697021484375,
+      "tau": 6.2700700759887695,
+      "lambda_decay": 0.4024471044540405,
+      "beta_consistency": null
+    },
+    {
+      "step": 1750,
+      "val_auroc": 0.6547555555555555,
+      "loss": 1.0341557264328003,
+      "proto_loss": 0.841997504234314,
+      "aux_loss": 0.6405273675918579,
+      "tau": 6.164995193481445,
+      "lambda_decay": 0.3908522129058838,
+      "beta_consistency": null
+    },
+    {
+      "step": 2000,
+      "val_auroc": 0.7124777777777778,
+      "loss": 0.6716862320899963,
+      "proto_loss": 0.5205582976341248,
+      "aux_loss": 0.5037597417831421,
+      "tau": 6.127810001373291,
+      "lambda_decay": 0.3873571753501892,
+      "beta_consistency": null
+    },
+    {
+      "step": 2250,
+      "val_auroc": 0.7171888888888889,
+      "loss": 0.895674467086792,
+      "proto_loss": 0.6889923214912415,
+      "aux_loss": 0.6889404058456421,
+      "tau": 6.112741470336914,
+      "lambda_decay": 0.38590091466903687,
+      "beta_consistency": null
+    },
+    {
+      "step": 2500,
+      "val_auroc": 0.7246111111111112,
+      "loss": 0.9634893536567688,
+      "proto_loss": 0.766068696975708,
+      "aux_loss": 0.658068835735321,
+      "tau": 6.106723308563232,
+      "lambda_decay": 0.3858731985092163,
+      "beta_consistency": null
+    },
+    {
+      "step": 2750,
+      "val_auroc": 0.7304222222222221,
+      "loss": 0.5666477084159851,
+      "proto_loss": 0.42101842164993286,
+      "aux_loss": 0.48543089628219604,
+      "tau": 6.101070404052734,
+      "lambda_decay": 0.38591697812080383,
+      "beta_consistency": null
+    },
+    {
+      "step": 3000,
+      "val_auroc": 0.7286222222222223,
+      "loss": 0.8921929597854614,
+      "proto_loss": 0.7013732194900513,
+      "aux_loss": 0.636065661907196,
+      "tau": 6.101297378540039,
+      "lambda_decay": 0.38592684268951416,
+      "beta_consistency": null
+    }
+  ],
+  "device": "cuda",
+  "minutes": 47.1
+}
