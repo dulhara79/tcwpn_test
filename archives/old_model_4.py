@@ -394,19 +394,6 @@ ABLATION_PRESETS = {
     # ------------------------------------------------------------------
     "temporal_aux":              (True,    False, True,  0.3),
     "pcw_aux":                   (False,   True,  True,  0.3),
-    # ------------------------------------------------------------------
-    # Auxiliary-weight sweep. Phase 3B established that essentially all of
-    # the jump from ~0.50 to ~0.74 comes from the auxiliary CE head, not
-    # from w^T or w^C. These isolate the dose-response of that head with
-    # both mechanisms OFF, so nothing else varies.
-    #
-    # SELECT ON VALIDATION ONLY. The test set is locked.
-    # ------------------------------------------------------------------
-    "aux_w0.1":                  (False,   False, True,  0.1),
-    "aux_w0.25":                 (False,   False, True,  0.25),
-    "aux_w0.5":                  (False,   False, True,  0.5),
-    "aux_w1.0":                  (False,   False, True,  1.0),
-    "aux_w2.0":                  (False,   False, True,  2.0),
 }
 
 
