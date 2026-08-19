@@ -1,0 +1,97 @@
+# ---------------------------------------------------------------------------
+# Single source of truth for the cross-repo mirror.
+# Both the workflows and guards.py read this file. Change mapping here only.
+# ---------------------------------------------------------------------------
+
+component:
+  # Used in commit messages, PR titles and the provenance manifest.
+  name: tcwpn
+  title: "Component 4 - Clinical NLP (TC-WPN)"
+  owner: dulhara79
+  student_id: IT22130648
+
+target:
+  repository: dulhara79/R26-DS-012
+  base_branch: main
+
+  # The bot owns this directory EXCLUSIVELY. Everything under it is replaced
+  # on every sync; nothing outside it is ever touched.
+  #
+  # It is deliberately nested one level below Anxiety_Detection_TC_WPN/ so that
+  # any hand-maintained files already living in that folder (deployment code,
+  # the HF Space, mobile-app glue) survive untouched. If Anxiety_Detection_TC_WPN/
+  # contains nothing but this research pipeline, you can flatten it to
+  # "Anxiety_Detection_TC_WPN" — but do that BEFORE the first sync, and know
+  # that the first PR will then delete anything already in there.
+  mirror_root: Anxiety_Detection_TC_WPN/research-pipeline
+
+  # Deterministic branch name. One branch => at most one open sync PR =>
+  # a second sync updates the first PR instead of competing with it.
+  # Never rename this to something dynamic (dates, SHAs); that is how you end
+  # up with N stale PRs that revert each other on merge.
+  sync_branch: sync/tcwpn/main
+
+guards:
+  # ---- Data governance -------------------------------------------------
+  # R26-DS-012 is a PUBLIC repository. MIMIC-IV is under a PhysioNet DUA and
+  # NHSL notes are identifiable clinical data. Neither may ever be mirrored.
+  # A match here fails the build; it does not warn.
+  forbidden_paths:
+    - "data/**"
+    - "**/mimic*/**"
+    - "**/nhsl*/**"
+    - "**/*.csv"
+    - "**/*.tsv"
+    - "**/*.parquet"
+    - "**/*.feather"
+    - "**/*.jsonl"
+    - "**/*.db"
+    - "**/*.sqlite"
+    - "**/*.sqlite3"
+    - "**/*.pkl"
+    - "**/*.pt"
+    - "**/*.pth"
+    - "**/*.bin"
+    - "**/*.safetensors"
+    - "**/*.ckpt"
+    - "**/*.h5"
+    - "**/.env"
+    - "**/.env.*"
+    - "**/*.pem"
+    - "**/*.key"
+    - "**/credentials*"
+    - "**/*_secret*"
+
+  # Paths that look forbidden but are legitimately code/config. Checked first.
+  allowlist:
+    - "configs/**/*.yaml"
+    - "configs/**/*.yml"
+    - "configs/**/*.json"
+    - "tests/fixtures/**/*.csv"      # synthetic fixtures only
+    - "tests/fixtures/**/*.jsonl"
+    - ".env.example"
+    - "__huggingface_repos__.json"
+
+  # ---- Repository hygiene ---------------------------------------------
+  max_file_bytes: 10485760           # 10 MiB. Anything bigger belongs in DVC/LFS.
+
+  # Notebooks must be committed with outputs stripped: outputs of a clinical
+  # NLP notebook can contain patient note text.
+  require_stripped_notebooks: true
+
+  # Simple credential shapes. GitHub secret scanning is the real net; this is
+  # a fast pre-flight so the credential never reaches the public monorepo.
+  credential_patterns:
+    - "(?i)aws_secret_access_key\\s*=\\s*['\"]?[A-Za-z0-9/+=]{40}"
+    - "(?i)\\bgh[pousr]_[A-Za-z0-9]{36,}"
+    - "(?i)\\bhf_[A-Za-z0-9]{34,}"
+    - "-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"
+    - "(?i)\\bsk-[A-Za-z0-9]{32,}"
+
+  # Files whose content is never scanned for credentials (binary, vendored).
+  scan_skip:
+    - "**/*.png"
+    - "**/*.jpg"
+    - "**/*.jpeg"
+    - "**/*.pdf"
+    - "**/*.svg"
