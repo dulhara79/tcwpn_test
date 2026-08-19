@@ -1,0 +1,25 @@
+{
+  "run": "tcwpn_full_k5_seed42",
+  "evidence": {
+    "candidate_strata": [
+      "anx_coded_this_adm"
+    ],
+    "stratum_underrepresented_in_train": false,
+    "knn_error_clustering_enrichment": 1.1637,
+    "model_auroc_test": 0.7379,
+    "untrained_centroid_auroc_projection": 0.7172,
+    "headroom_model_minus_centroid": 0.0207,
+    "auroc_weighted_minus_uniform": 0.0009,
+    "decision_flip_rate_errors": 0.0624
+  },
+  "branches": {
+    "DATA": false,
+    "EMBEDDING": true,
+    "MODEL": true
+  },
+  "fired": [
+    "EMBEDDING",
+    "MODEL"
+  ],
+  "conclusion": "EMBEDDING_AND_MODEL"
+}

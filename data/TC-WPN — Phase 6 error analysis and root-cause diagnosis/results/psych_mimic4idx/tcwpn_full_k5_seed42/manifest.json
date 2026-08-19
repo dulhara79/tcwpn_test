@@ -1,0 +1,154 @@
+{
+  "run_name": "tcwpn_full_k5_seed42",
+  "config": {
+    "name": "tcwpn_full",
+    "description": "Full TC-WPN as reported in the paper: w^T + w^C + tau + auxiliary CE head.\n",
+    "model": {
+      "preset": "tcwpn_full",
+      "encoder_name": "emilyalsentzer/Bio_ClinicalBERT",
+      "projection_dim": 256,
+      "freeze_bert": false,
+      "init_temperature": 10.0,
+      "init_lambda": 0.5,
+      "init_beta": 2.0,
+      "consistency_passes": 1
+    },
+    "optim": {
+      "encoder_lr": 2e-05,
+      "head_lr": 0.001,
+      "weight_decay": 0.01,
+      "warmup_frac": 0.1,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "amp": true,
+      "eval_every": 250,
+      "val_episodes": 60
+    },
+    "threshold_objective": "f1"
+  },
+  "k_shot": 5,
+  "seed": 42,
+  "stem": "psych_mimic4idx",
+  "best_val_auroc_quick": 0.7660000000000001,
+  "best_step": 1500,
+  "locked_threshold": 0.26931220789750415,
+  "val_plan_meta": {
+    "kind": "eval",
+    "split": "val",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 801,
+    "n_repeats": 3,
+    "seed": 1047,
+    "store_fingerprint": "57606f017e267766"
+  },
+  "train_plan_meta": {
+    "kind": "train",
+    "split": "train",
+    "k_shot": 5,
+    "q_query": 5,
+    "n_episodes": 3000,
+    "seed": 47,
+    "store_fingerprint": "81f23d8f6020e0f2"
+  },
+  "history": [
+    {
+      "step": 250,
+      "val_auroc": 0.5458444444444445,
+      "loss": 0.9173121452331543,
+      "tau": 9.187884330749512,
+      "lambda_decay": 0.4884088933467865,
+      "beta_consistency": 2.0681650638580322
+    },
+    {
+      "step": 500,
+      "val_auroc": 0.559,
+      "loss": 0.8806990385055542,
+      "tau": 7.795717239379883,
+      "lambda_decay": 0.4636824429035187,
+      "beta_consistency": 2.1454591751098633
+    },
+    {
+      "step": 750,
+      "val_auroc": 0.7331222222222223,
+      "loss": 0.8398928642272949,
+      "tau": 7.383962154388428,
+      "lambda_decay": 0.45517697930336,
+      "beta_consistency": 2.199090003967285
+    },
+    {
+      "step": 1000,
+      "val_auroc": 0.7452555555555556,
+      "loss": 0.920728862285614,
+      "tau": 7.184842109680176,
+      "lambda_decay": 0.4544796049594879,
+      "beta_consistency": 2.134260416030884
+    },
+    {
+      "step": 1250,
+      "val_auroc": 0.7506666666666667,
+      "loss": 0.6737510561943054,
+      "tau": 7.050123691558838,
+      "lambda_decay": 0.4480600655078888,
+      "beta_consistency": 2.0853002071380615
+    },
+    {
+      "step": 1500,
+      "val_auroc": 0.7660000000000001,
+      "loss": 0.8489126563072205,
+      "tau": 6.981020927429199,
+      "lambda_decay": 0.446336567401886,
+      "beta_consistency": 2.0333971977233887
+    },
+    {
+      "step": 1750,
+      "val_auroc": 0.7568000000000001,
+      "loss": 0.4215445816516876,
+      "tau": 6.96803617477417,
+      "lambda_decay": 0.4419260621070862,
+      "beta_consistency": 2.0015017986297607
+    },
+    {
+      "step": 2000,
+      "val_auroc": 0.7539555555555554,
+      "loss": 0.5900176167488098,
+      "tau": 6.937289714813232,
+      "lambda_decay": 0.4399087429046631,
+      "beta_consistency": 1.9904453754425049
+    },
+    {
+      "step": 2250,
+      "val_auroc": 0.7659555555555555,
+      "loss": 0.7700064182281494,
+      "tau": 6.929896354675293,
+      "lambda_decay": 0.43856385350227356,
+      "beta_consistency": 1.9880108833312988
+    },
+    {
+      "step": 2500,
+      "val_auroc": 0.7640555555555555,
+      "loss": 0.6624265313148499,
+      "tau": 6.9338274002075195,
+      "lambda_decay": 0.4382600486278534,
+      "beta_consistency": 1.9878562688827515
+    },
+    {
+      "step": 2750,
+      "val_auroc": 0.7637333333333334,
+      "loss": 0.504706859588623,
+      "tau": 6.928073883056641,
+      "lambda_decay": 0.4378347098827362,
+      "beta_consistency": 1.985133171081543
+    },
+    {
+      "step": 3000,
+      "val_auroc": 0.7626888888888887,
+      "loss": 1.180245041847229,
+      "tau": 6.928412914276123,
+      "lambda_decay": 0.4378160834312439,
+      "beta_consistency": 1.984992265701294
+    }
+  ],
+  "device": "cuda",
+  "minutes": 47.1
+}

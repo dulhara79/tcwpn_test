@@ -1,0 +1,17 @@
+Error,Actual,Prediction,p_note,chars,dt_days,Note characteristics (measured)
+FN,Anxiety,Control,0.028,7834,11.4,has psych term seen; has med term seen; truncated by 512
+FN,Anxiety,Control,0.029,9100,965.7,has indirect term seen; has psych term seen; has med term seen; anxiety in full but not in window; truncated by 512
+FN,Anxiety,Control,0.043,12003,2003.5,has indirect term seen; has psych term seen; has med term seen; truncated by 512
+FN,Anxiety,Control,0.048,7026,1335.8,has indirect term seen; has psych term seen; truncated by 512
+FN,Anxiety,Control,0.054,8349,0.8,has indirect term seen; has psych term seen; has med term seen; anxiety in full but not in window; truncated by 512
+FN,Anxiety,Control,0.064,10549,181.5,has indirect term seen; has psych term seen; truncated by 512
+FN,Anxiety,Control,0.067,6664,0.8,has psych term seen; anxiety in full but not in window; truncated by 512
+FN,Anxiety,Control,0.069,7647,1413.7,has indirect term seen; has psych term seen; truncated by 512
+FP,Control,Anxiety,0.971,9707,144.7,truncated by 512
+FP,Control,Anxiety,0.95,4622,0.6,has anx term seen; truncated by 512
+FP,Control,Anxiety,0.931,14311,0.5,has anx term seen; has indirect term seen; has psych term seen; truncated by 512
+FP,Control,Anxiety,0.917,7700,0.7,has anx term seen; has psych term seen; truncated by 512
+FP,Control,Anxiety,0.915,10393,0.7,has anx term seen; has indirect term seen; has psych term seen; truncated by 512
+FP,Control,Anxiety,0.908,6528,175.6,has indirect term seen; truncated by 512
+FP,Control,Anxiety,0.906,5287,0.4,has anx term seen; has med term seen; truncated by 512
+FP,Control,Anxiety,0.896,9907,0.6,has anx term seen; has indirect term seen; has psych term seen; has med term seen; truncated by 512

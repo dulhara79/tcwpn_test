@@ -1,0 +1,12 @@
+{
+  "model_a": "tcwpn_full_k5_seed42",
+  "model_b": "aux_only_k5_seed42",
+  "auroc_a": 0.7378861788617886,
+  "auroc_b": 0.7432332554283775,
+  "delta_auroc": -0.0053470765665888376,
+  "z": -0.9925126571274784,
+  "p_value": 0.3209475082473612,
+  "significant_at_0.05": false,
+  "n_patients": 2278,
+  "shared_patient_fraction": 1.0
+}

@@ -1,0 +1,7 @@
+{
+  "auroc_weighted": 0.7378861788617885,
+  "auroc_uniform_weights": 0.7369385349873154,
+  "delta_attributable_to_weighting": 0.000947643874473103,
+  "decision_flip_rate_all": 0.05600689315608075,
+  "decision_flip_rate_errors": 0.062402980440856876
+}
