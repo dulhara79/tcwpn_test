@@ -1,0 +1,289 @@
+# ---------------------------------------------------------------------------
+# Mirror dulhara79/tcwpn_test -> dulhara79/R26-DS-012 as a pull request.
+#
+# INVARIANT (this is what makes the design safe):
+#
+#   * tcwpn_test@main is the ONLY source of truth for everything under
+#     <mirror_root> in the monorepo.
+#   * R26-DS-012@main is the only source of truth for everything OUTSIDE
+#     <mirror_root>.
+#   * The sync branch is always rebuilt from the LATEST origin/main of the
+#     monorepo, then <mirror_root> is replaced wholesale.
+#
+# Consequences:
+#   - Another component's PR merging first is never reverted: the next sync
+#     rebuilds on top of it.
+#   - Two syncs can never race: the concurrency group serialises them.
+#   - Two syncs can never open competing PRs: the branch name is deterministic,
+#     so a second run updates the SAME open PR instead of forking a new one.
+#   - A file deleted in tcwpn_test is actually deleted in the monorepo, so the
+#     two never silently drift apart.
+# ---------------------------------------------------------------------------
+name: sync-to-monorepo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build the mirror and show the diff, but do not push or open a PR.
+        type: boolean
+        default: false
+
+# Serialise every sync. cancel-in-progress MUST stay false: cancelling a
+# half-finished sync is exactly how you lose commits.
+concurrency:
+  group: sync-tcwpn-to-monorepo
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Nothing is mirrored unless the same gate that guards PRs passes here too.
+  quality-gate:
+    name: Quality gate
+    uses: ./.github/workflows/_quality-gate.yml
+    with:
+      python-version: "3.11"
+      run-tests: true
+
+  sync:
+    name: Mirror and open PR
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # ---------------------------------------------------------------
+      # Checkout both sides. persist-credentials:false on the source so
+      # the sync token is the only credential in the workspace.
+      # ---------------------------------------------------------------
+      - name: Checkout source (tcwpn_test)
+        uses: actions/checkout@v4
+        with:
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout target (R26-DS-012)
+        uses: actions/checkout@v4
+        with:
+          repository: dulhara79/R26-DS-012
+          token: ${{ secrets.MONOREPO_SYNC_TOKEN }}
+          path: monorepo
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: python -m pip install --upgrade pip pyyaml
+
+      # ---------------------------------------------------------------
+      # Load config into the environment so every later step agrees on
+      # the mirror root and branch name.
+      # ---------------------------------------------------------------
+      - name: Load sync configuration
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import yaml
+          cfg = yaml.safe_load(open("source/.github/sync/sync.config.yml"))
+          t = cfg["target"]
+          print(f"TARGET_REPO={t['repository']}")
+          print(f"TARGET_BASE={t['base_branch']}")
+          print(f"MIRROR_ROOT={t['mirror_root'].rstrip('/')}")
+          print(f"SYNC_BRANCH={t['sync_branch']}")
+          print(f"COMPONENT={cfg['component']['name']}")
+          PY
+
+      - name: Re-run guards against the exact tree being mirrored
+        working-directory: source
+        run: python .github/sync/guards.py --config .github/sync/sync.config.yml --strict
+
+      # ---------------------------------------------------------------
+      # Always rebuild the sync branch from the latest monorepo main.
+      # This is what prevents an older sync from reverting work that
+      # another component merged in the meantime.
+      # ---------------------------------------------------------------
+      - name: Rebase sync branch onto latest monorepo main
+        working-directory: monorepo
+        run: |
+          set -euo pipefail
+          git config user.name  "tcwpn-sync[bot]"
+          git config user.email "tcwpn-sync@users.noreply.github.com"
+          git fetch origin --prune
+          git checkout -B "$SYNC_BRANCH" "origin/$TARGET_BASE"
+          echo "Sync branch rebuilt on $(git rev-parse --short HEAD) of $TARGET_BASE"
+
+      # ---------------------------------------------------------------
+      # Replace the mirror root wholesale. rsync --delete is scoped to
+      # the mirror root only, so no other component's folder can be
+      # touched even in principle.
+      # ---------------------------------------------------------------
+      - name: Materialise mirror
+        run: |
+          set -euo pipefail
+          DEST="monorepo/${MIRROR_ROOT}"
+          mkdir -p "$DEST"
+          rsync -a --delete \
+            --exclude-from=source/.github/sync/exclude.txt \
+            --exclude='.git/' \
+            source/ "$DEST/"
+
+      - name: Write provenance manifest
+        run: |
+          set -euo pipefail
+          cat > "monorepo/${MIRROR_ROOT}/.sync-metadata.json" <<JSON
+          {
+            "generated_by": "tcwpn_test/.github/workflows/sync-to-monorepo.yml",
+            "component": "${COMPONENT}",
+            "source_repository": "${{ github.repository }}",
+            "source_branch": "${{ github.ref_name }}",
+            "source_commit": "${{ github.sha }}",
+            "source_commit_url": "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}",
+            "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "mirror_root": "${MIRROR_ROOT}",
+            "synced_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSON
+
+      # ---------------------------------------------------------------
+      # Scope guard. Belt and braces on top of the scoped pathspec: if a
+      # single byte outside the mirror root is staged, fail loudly.
+      # ---------------------------------------------------------------
+      - name: Stage and verify scope
+        id: stage
+        working-directory: monorepo
+        run: |
+          set -euo pipefail
+          git add -A -- "$MIRROR_ROOT"
+
+          OUT_OF_SCOPE=$(git diff --cached --name-only | grep -v "^${MIRROR_ROOT}/" || true)
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "::error::Sync tried to modify paths outside ${MIRROR_ROOT}:"
+            echo "$OUT_OF_SCOPE"
+            exit 1
+          fi
+
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Mirror already up to date; nothing to sync."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --cached --stat | tail -n 40
+          fi
+
+      - name: Commit
+        if: steps.stage.outputs.changed == 'true'
+        working-directory: monorepo
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          git commit --no-verify -m "chore(sync): mirror ${COMPONENT} @ ${SHORT_SHA} into ${MIRROR_ROOT}" \
+            -m "Automated mirror of ${{ github.repository }}@${{ github.ref_name }}." \
+            -m "Source-Repository: ${{ github.repository }}" \
+            -m "Source-Commit: ${{ github.sha }}" \
+            -m "Workflow-Run: ${{ github.run_id }}"
+
+      - name: Push sync branch
+        if: steps.stage.outputs.changed == 'true' && !inputs.dry_run
+        working-directory: monorepo
+        run: |
+          set -euo pipefail
+          REMOTE_SHA=$(git ls-remote --heads origin "$SYNC_BRANCH" | cut -f1)
+          if [ -n "$REMOTE_SHA" ]; then
+            # --force-with-lease: refuse to clobber if someone else moved the
+            # branch since we read it. Force is required because we rebase the
+            # branch onto main on every run.
+            git push --force-with-lease="refs/heads/${SYNC_BRANCH}:${REMOTE_SHA}" \
+              origin "HEAD:refs/heads/${SYNC_BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${SYNC_BRANCH}"
+          fi
+
+      - name: Ensure labels exist
+        if: steps.stage.outputs.changed == 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.MONOREPO_SYNC_TOKEN }}
+        run: |
+          gh label create "automated-sync" --repo "$TARGET_REPO" --color "0e8a16" \
+            --description "Opened by a cross-repo mirror workflow" 2>/dev/null || true
+          gh label create "component:tcwpn" --repo "$TARGET_REPO" --color "1d76db" \
+            --description "Component 4 - Clinical NLP (TC-WPN)" 2>/dev/null || true
+
+      # ---------------------------------------------------------------
+      # Idempotent PR. If one is already open on this branch we update it
+      # rather than opening a second one. That is the whole anti-overlap
+      # story: one branch, at most one open PR, always rebased on main.
+      # ---------------------------------------------------------------
+      - name: Open or update pull request
+        if: steps.stage.outputs.changed == 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.MONOREPO_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TITLE="chore(sync): ${COMPONENT} mirror from tcwpn_test@${SHORT_SHA}"
+
+          cat > /tmp/pr-body.md <<'BODY'
+          ## Automated component mirror
+
+          This PR mirrors the TC-WPN research pipeline from the component repository
+          into `MIRROR_ROOT_PLACEHOLDER`. It is generated, not hand-written.
+
+          | | |
+          |---|---|
+          | Source repo | `SOURCE_REPO_PLACEHOLDER` |
+          | Source commit | SOURCE_COMMIT_PLACEHOLDER |
+          | Workflow run | RUN_URL_PLACEHOLDER |
+
+          ### Guarantees
+          - Branch is rebuilt from the latest `main` on every sync, so merged work
+            from other components is never reverted.
+          - Only paths under `MIRROR_ROOT_PLACEHOLDER` are modified; a scope guard fails
+            the job otherwise.
+          - Data-governance guards passed: no MIMIC-IV / NHSL artefacts, no files over
+            the size limit, no credential patterns.
+
+          ### Reviewer notes
+          Do **not** push fixes to this branch. It is force-rebuilt on every sync and
+          your commits would be overwritten. Fix in `tcwpn_test` and let the mirror
+          re-run.
+          BODY
+
+          sed -i \
+            -e "s|MIRROR_ROOT_PLACEHOLDER|${MIRROR_ROOT}|g" \
+            -e "s|SOURCE_REPO_PLACEHOLDER|${{ github.repository }}|g" \
+            -e "s|SOURCE_COMMIT_PLACEHOLDER|${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|g" \
+            -e "s|RUN_URL_PLACEHOLDER|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|g" \
+            /tmp/pr-body.md
+
+          EXISTING=$(gh pr list --repo "$TARGET_REPO" --head "$SYNC_BRANCH" \
+                       --state open --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --repo "$TARGET_REPO" --title "$TITLE" --body-file /tmp/pr-body.md
+            gh pr comment "$EXISTING" --repo "$TARGET_REPO" \
+              --body "Updated with \`tcwpn_test@${SHORT_SHA}\`. Branch rebased onto \`${TARGET_BASE}\`."
+            echo "PR_URL=$(gh pr view "$EXISTING" --repo "$TARGET_REPO" --json url --jq .url)" >> "$GITHUB_ENV"
+          else
+            URL=$(gh pr create --repo "$TARGET_REPO" \
+              --base "$TARGET_BASE" --head "$SYNC_BRANCH" \
+              --title "$TITLE" --body-file /tmp/pr-body.md \
+              --label "automated-sync" --label "component:tcwpn")
+            echo "PR_URL=$URL" >> "$GITHUB_ENV"
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### TC-WPN monorepo sync"
+            echo ""
+            echo "- Target: \`${TARGET_REPO:-n/a}\` → \`${MIRROR_ROOT:-n/a}\`"
+            echo "- Sync branch: \`${SYNC_BRANCH:-n/a}\`"
+            echo "- Changes detected: \`${{ steps.stage.outputs.changed }}\`"
+            if [ -n "${PR_URL:-}" ]; then echo "- Pull request: ${PR_URL}"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# rsync --exclude-from list for the monorepo mirror.
+#
+# IMPORTANT: rsync evaluates rules top-to-bottom and the FIRST match wins.
+# Every "+ " (include) rule must therefore appear ABOVE the "- " (exclude)
+# rule that would otherwise swallow it. Do not reorder this file casually.
+#
+# Rule of thumb: mirror source, docs, configs and tests. Never mirror data,
+# weights, caches, or CI plumbing that belongs to the component repo only.
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# 1. EXPLICIT INCLUDES (must come first)
+# ===========================================================================
++ tests/
++ tests/fixtures/
++ tests/fixtures/**
++ configs/
++ configs/**
++ .env.example
++ __huggingface_repos__.json
+
+# ===========================================================================
+# 2. Git / CI plumbing - belongs to tcwpn_test only
+# ===========================================================================
+- .git/
+- .github/
+- .gitattributes
+
+# ===========================================================================
+# 3. Clinical / restricted data (PhysioNet DUA, NHSL notes)
+#    R26-DS-012 is PUBLIC. None of this may ever leave this repository.
+# ===========================================================================
+- data/
+- mimic*/
+- nhsl*/
+- *.csv
+- *.tsv
+- *.parquet
+- *.feather
+- *.jsonl
+- *.db
+- *.sqlite
+- *.sqlite3
+
+# ===========================================================================
+# 4. Model artefacts - use HF Hub / DVC, not git
+# ===========================================================================
+- *.pt
+- *.pth
+- *.bin
+- *.ckpt
+- *.h5
+- *.pkl
+- *.safetensors
+- checkpoints/
+- outputs/
+- runs/
+- wandb/
+- mlruns/
+- lightning_logs/
+
+# ===========================================================================
+# 5. Secrets
+# ===========================================================================
+- .env
+- .env.*
+- *.pem
+- *.key
+- credentials*
+
+# ===========================================================================
+# 6. Caches and local noise
+# ===========================================================================
+- __pycache__/
+- *.py[cod]
+- .pytest_cache/
+- .ruff_cache/
+- .mypy_cache/
+- .ipynb_checkpoints/
+- .venv/
+- venv/
+- env/
+- .DS_Store
+- Thumbs.db
+- *.log
+- .coverage
+- coverage.xml
+- htmlcov/
+- dist/
+- build/
+- *.egg-info/
+- .idea/
+- .vscode/
