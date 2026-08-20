@@ -1,0 +1,17 @@
+{
+  "as_reported": {
+    "S0_pretrained_768": 0.6307,
+    "S1_finetuned_768": 0.7688,
+    "S2_projection_256": 0.7611,
+    "S3_tcwpn_full": 0.7379,
+    "S2_5shot_centroid_same_episodes": 0.7369
+  },
+  "counts": {
+    "test_notes_all": 3450,
+    "test_notes_queried": 2907,
+    "test_patients": 2278,
+    "train_patients_probe": 10290,
+    "support_patients_per_class": 5
+  },
+  "matched_delta_S3_minus_5shot_centroid": 0.0010000000000000009
+}
