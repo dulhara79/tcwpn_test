@@ -1,0 +1,677 @@
+TC-WPN — Phase 7B: run Controlled Experiment 1 (max_chunks 1 → 4)
+Component: R26-DS-012 / TC-WPN — Dulhara Kaushalya (IT22130648)
+
+Phase 7 prepared the experiment. It did not run it. The committed log ends with:
+
+RUN_TRAINING is False — nothing trained.
+have 0/5 new seeds: []
+So the honest status is halfway through Phase 7: investigate → validate → design the intervention → prepare the data are done; retrain → evaluate → compare → decide are not. This notebook does the second half.
+
+What Phase 7 did establish (verified, not assumed)
+check	result
+record count / note_ids / labels unchanged	True for train, val, test
+store_fingerprint unchanged	True → frozen plans valid, baseline needs no re-scoring
+tokens per note	511.8 → 1993.2, +289.4%
+records gaining a chunk	99.85% (train), mean 3.94 chunks
+So max_chunks=4 is emphatically not a no-op. The model will now see roughly four times as much of each note.
+
+Three blockers Phase 7 would have hit on the first training run
+These are why this notebook exists rather than just flipping RUN_TRAINING = True.
+
+Blocker 1 — the new runs would overwrite the frozen baseline
+scripts/train.py line 66:
+
+run_name = f"{cfg['name']}_k{args.k}_seed{args.seed}"
+run_dir  = Path(args.results) / args.stem / run_name
+The run directory is named from cfg['name'] inside the YAML, not from the config filename. configs/tcwpn_full.yaml has name: tcwpn_full, so training seed 42 with that config writes to:
+
+/kaggle/working/results/psych_mimic4idx/tcwpn_full_k5_seed42
+which is the exact directory Phase 7 cell 0.1 copied the frozen baseline into. The first training run would overwrite the baseline's best.pt, manifest.json and predictions_test.csv — and the paired comparison would then be comparing the new model against itself.
+
+Phase 7's discovery glob has the mirror-image problem:
+
+Path("/kaggle/working/results").rglob(f"*mc*_k{K}_seed{s}/eval_test.json")
+No directory would ever contain mc, so even a successful run would report 0/5 new seeds forever.
+
+Fix: write configs/tcwpn_full_mc4.yaml, byte-identical to tcwpn_full.yaml except name: tcwpn_full_mc4. name is only a run label — it is not read by build_model and not part of any hyper-parameter. The single-variable design is preserved; the runs land in tcwpn_full_mc4_k5_seed*; the baseline is untouched; the glob matches. Part 1 diffs the two configs and fails if anything except name differs.
+
+Blocker 2 — memory
+An episode packs 2·K support + 2·q query notes. At K=5, q=5 that is 20 notes. With max_chunks=1 the encoder sees 20 sequences of 512 tokens per forward; at max_chunks=4 it sees up to 80, because collate._pack emits one row per chunk and ClinicalEmbedder runs them in a single self.bert(...) call. Four times the activations, with gradients, on a 16 GB T4.
+
+This is not predicted here — Part 2 measures peak memory on one real training step before committing to five runs.
+
+Blocker 3 — wall-clock
+The baseline manifest records ~47 min/seed. At ~4× encoder work that is plausibly ~3 h/seed, so five seeds is ~15 h against a 30 h/week quota and a 12 h session cap. Part 3 runs one seed per invocation and resumes, so the experiment survives session limits.
+
+What is NOT changed
+cohort · labels · patient splits · episode plans · seeds 42-46 · K=5
+architecture · encoder · pooling · projection_dim · init_temperature
+init_lambda · init_beta · consistency_passes · encoder_lr · head_lr
+weight_decay · warmup_frac · grad_accum · grad_clip · amp · eval_every
+val_episodes · threshold_objective
+Changed: max_chunks: 1 → 4 (the pkl), and name: (a directory label only).
+
+Pre-registered decision rule — unchanged, and not to be edited after seeing results
+Seeds     : 42, 43, 44, 45, 46
+Selection : validation only; test scored ONCE
+Success   : mean ΔAUROC >= +0.020  AND  paired p < 0.05  AND  >= 4/5 seeds improve
+One wording correction carried over from the review, and it is worth making properly: the aux_only seed spread of 0.0199 is not a definition of statistical noise. The correct statement is "we pre-specified +0.020 AUROC as the minimum practically meaningful improvement, informed by the observed seed-to-seed variability of the baseline." The number is unchanged; the justification is now stated correctly.
+
+Comparator: tcwpn_full seeds 42–46 = 0.7379, 0.7394, 0.7386, 0.7403, 0.7323 (mean 0.7377 ± 0.0031).
+
+Accelerator GPU T4 x2 (not P100 — sm_60 is absent from Kaggle's PyTorch build).
+
+# ---------------------------------------------------------------------------
+# 0.0  Repo, dependencies, device guard.
+# ---------------------------------------------------------------------------
+!rm -rf /kaggle/working/tcwpn_test
+!git clone -q https://github.com/dulhara79/tcwpn_test.git /kaggle/working/tcwpn_test
+%cd /kaggle/working/tcwpn_test
+!git log --oneline -1
+!pip install -q -r requirements.txt 2>&1 | tail -2
+
+import os, sys, json, glob, shutil, re, time, subprocess
+from pathlib import Path
+import numpy as np, pandas as pd, torch
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+sys.path.insert(0, "/kaggle/working/tcwpn_test/src")
+
+ALLOW_CPU_FALLBACK = False
+def resolve_device():
+    if not torch.cuda.is_available():
+        return "cpu"
+    cap = torch.cuda.get_device_capability(0); sm = f"sm_{cap[0]}{cap[1]}"
+    arches = list(torch.cuda.get_arch_list())
+    tot = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f"GPU   : {torch.cuda.get_device_name(0)} ({sm}, {tot:.1f} GB)")
+    print(f"build : {', '.join(arches) or 'unknown'}")
+    if arches and sm not in arches:
+        print(f"  {sm} NOT in this PyTorch build."); return "unsupported_gpu"
+    try:
+        (torch.zeros(8, 8, device="cuda") @ torch.zeros(8, 8, device="cuda")).sum().item()
+        torch.cuda.synchronize()
+    except Exception as e:
+        print(f"  kernel test FAILED: {type(e).__name__}: {e}"); return "unsupported_gpu"
+    return "cuda"
+
+_d = resolve_device()
+if _d == "unsupported_gpu":
+    print("\nSWITCH ACCELERATOR TO 'GPU T4 x2' AND RE-RUN.")
+    if not ALLOW_CPU_FALLBACK:
+        raise SystemExit("unsupported GPU architecture")
+    DEVICE = "cpu"
+else:
+    DEVICE = _d
+print("torch", torch.__version__, "| DEVICE", DEVICE)
+/kaggle/working/tcwpn_test
+d03e9a0 (HEAD -> main, origin/main, origin/HEAD) Create kaggle_phase7_maxchunks_experiment.ipynb
+GPU   : Tesla T4 (sm_75, 15.6 GB)
+build : sm_70, sm_75, sm_80, sm_86, sm_90, sm_100, sm_120
+torch 2.10.0+cu128 | DEVICE cuda
+# ---------------------------------------------------------------------------
+# 0.1  Inputs. The 4-chunk pkl from Phase 7 is reused if it was saved as a
+#      dataset; otherwise Part 1 regenerates it (deterministic, ~10 min).
+# ---------------------------------------------------------------------------
+STEM, K = "psych_mimic4idx", 5
+SEEDS = [42, 43, 44, 45, 46]
+BASELINE = {42: 0.7379, 43: 0.7394, 44: 0.7386, 45: 0.7403, 46: 0.7323}
+OUT = Path("/kaggle/working/phase7b"); OUT.mkdir(parents=True, exist_ok=True)
+RESULTS = Path("/kaggle/working/results")
+REPO = Path("/kaggle/working/tcwpn_test")
+
+stage_a = next((p.parent for p in Path("/kaggle/input").rglob("plans")
+                if (p.parent / "pkl").exists()), None)
+if stage_a is None:
+    raise SystemExit("Stage A dataset not found (needs pkl/ and plans/ side by side)")
+PKL_OLD, PLAN_DIR = stage_a / "pkl", stage_a / "plans"
+
+hits = sorted(Path("/kaggle/input").rglob(f"cohort_{STEM}.csv"))
+if not hits:
+    raise SystemExit(f"cohort_{STEM}.csv not found")
+COHORT_CSV = hits[0]
+
+# a previously-built 4-chunk pkl, if Phase 7's output was saved as an input
+PKL_MC4 = None
+for cand in Path("/kaggle/input").rglob(f"{STEM}_train.pkl"):
+    if cand.parent == PKL_OLD:
+        continue
+    if "mc4" in str(cand.parent).lower() or cand.stat().st_size > 100e6:
+        PKL_MC4 = cand.parent; break
+print("stage A pkl :", PKL_OLD)
+print("plans       :", PLAN_DIR)
+print("cohort CSV  :", COHORT_CSV)
+print("4-chunk pkl :", PKL_MC4 if PKL_MC4 else "not attached — Part 1 will build it")
+
+# ---- frozen baseline: keep it OUT of the training results tree --------------
+FROZEN = Path("/kaggle/working/frozen_baseline") / STEM
+def import_run(name):
+    cands = [d for d in Path("/kaggle/input").rglob(name)
+             if d.is_dir() and (d / "manifest.json").exists()]
+    if not cands:
+        return None
+    with_ckpt = [d for d in cands if (d / "best.pt").exists()]
+    src = max(with_ckpt, key=lambda d: (d / "best.pt").stat().st_size) if with_ckpt else cands[0]
+    dst = FROZEN / name; dst.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        if f.is_file():
+            shutil.copy2(f, dst / f.name)
+    return dst
+
+BASE_RUNS = {}
+for s in SEEDS:
+    d = import_run(f"tcwpn_full_k{K}_seed{s}")
+    if d: BASE_RUNS[s] = d
+print(f"\nfrozen baseline runs imported to {FROZEN}: {sorted(BASE_RUNS)}")
+print("  (deliberately NOT under /kaggle/working/results, so training cannot")
+print("   overwrite them — see Blocker 1.)")
+stage A pkl : /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/pkl
+plans       : /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans
+cohort CSV  : /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/cohort_psych_mimic4idx.csv
+4-chunk pkl : not attached — Part 1 will build it
+
+frozen baseline runs imported to /kaggle/working/frozen_baseline/psych_mimic4idx: [42]
+  (deliberately NOT under /kaggle/working/results, so training cannot
+   overwrite them — see Blocker 1.)
+Part 1 — the collision-free config, and the 4-chunk data
+name: is the only key that differs. Part 1.1 proves that by diffing the parsed YAML rather than the text, so whitespace or comment changes cannot hide a real difference.
+
+A note on why this is legitimate: train.py uses cfg['name'] solely to build run_name. build_model receives cfg['model'], and the optimiser receives cfg['optim'] — neither reads name. Changing it alters where results are written and nothing about the model.
+
+# ---------------------------------------------------------------------------
+# 1.1  Create configs/tcwpn_full_mc4.yaml — identical except `name`.
+# ---------------------------------------------------------------------------
+import yaml
+SRC_CFG = Path("configs/tcwpn_full.yaml")
+NEW_CFG = Path("configs/tcwpn_full_mc4.yaml")
+RUN_TAG = "tcwpn_full_mc4"
+
+base_cfg = yaml.safe_load(SRC_CFG.read_text())
+print(f"source config name: {base_cfg['name']}  (-> run dirs {base_cfg['name']}_k{K}_seed*)")
+print(f"frozen baseline dirs are also named {base_cfg['name']}_k{K}_seed*  <-- the collision")
+
+new_cfg = yaml.safe_load(SRC_CFG.read_text())
+new_cfg["name"] = RUN_TAG
+new_cfg["description"] = (
+    "Phase 7B controlled experiment: identical to tcwpn_full; the ONLY substantive "
+    "change is the tokenized input (max_chunks 1 -> 4). `name` differs so results "
+    "do not overwrite the frozen baseline."
+)
+NEW_CFG.write_text(yaml.safe_dump(new_cfg, sort_keys=False))
+
+# ---- prove nothing else changed --------------------------------------------
+def flatten(d, pre=""):
+    out = {}
+    for k, v in d.items():
+        key = f"{pre}{k}"
+        if isinstance(v, dict):
+            out.update(flatten(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+fa, fb = flatten(base_cfg), flatten(yaml.safe_load(NEW_CFG.read_text()))
+diff = {k: (fa.get(k), fb.get(k)) for k in set(fa) | set(fb) if fa.get(k) != fb.get(k)}
+print("\nparsed-YAML differences:")
+for k, (a, b) in sorted(diff.items()):
+    print(f"   {k}: {a!r}  ->  {b!r}")
+unexpected = {k for k in diff if k not in ("name", "description")}
+if unexpected:
+    raise SystemExit(f"config differs beyond the run label: {unexpected} — NOT single-variable")
+print("\nOK — only `name` and `description` differ. Every model and optimiser key is identical.")
+print(f"new run dirs will be: {RUN_TAG}_k{K}_seed<seed>")
+source config name: tcwpn_full  (-> run dirs tcwpn_full_k5_seed*)
+frozen baseline dirs are also named tcwpn_full_k5_seed*  <-- the collision
+
+parsed-YAML differences:
+   description: 'Full TC-WPN as reported in the paper: w^T + w^C + tau + auxiliary CE head.\n'  ->  'Phase 7B controlled experiment: identical to tcwpn_full; the ONLY substantive change is the tokenized input (max_chunks 1 -> 4). `name` differs so results do not overwrite the frozen baseline.'
+   name: 'tcwpn_full'  ->  'tcwpn_full_mc4'
+
+OK — only `name` and `description` differ. Every model and optimiser key is identical.
+new run dirs will be: tcwpn_full_mc4_k5_seed<seed>
+# ---------------------------------------------------------------------------
+# 1.2  Ensure the 4-chunk pkl exists, and re-verify Phase 7's identity checks.
+# ---------------------------------------------------------------------------
+MAX_CHUNKS_NEW = 4
+if PKL_MC4 is None:
+    PKL_MC4 = Path("/kaggle/working/pkl_mc4"); PKL_MC4.mkdir(parents=True, exist_ok=True)
+    !python -m scripts.tokenize_cohort \
+        --cohort {COHORT_CSV} --out {PKL_MC4} --max-chunks {MAX_CHUNKS_NEW}
+else:
+    print(f"reusing attached 4-chunk pkl: {PKL_MC4}")
+
+from tcwpn.sampler import RecordStore, EpisodePlan, store_fingerprint
+rows, fp_ok = [], True
+for split in ("train", "val", "test"):
+    old = RecordStore.from_pkl(PKL_OLD / f"{STEM}_{split}.pkl", split_name=split)
+    new = RecordStore.from_pkl(PKL_MC4 / f"{STEM}_{split}.pkl", split_name=split)
+    same = (len(old.records) == len(new.records)
+            and all(str(a["note_id"]) == str(b["note_id"]) for a, b in zip(old.records, new.records))
+            and all(int(a["label"]) == int(b["label"]) for a, b in zip(old.records, new.records)))
+    fpo, fpn = store_fingerprint(old), store_fingerprint(new)
+    fp_ok &= (fpo == fpn)
+    ch = np.array([len(r["input_ids"]) for r in new.records])
+    tk_o = np.array([sum(sum(c) for c in r["attention_mask"]) for r in old.records])
+    tk_n = np.array([sum(sum(c) for c in r["attention_mask"]) for r in new.records])
+    rows.append({"split": split, "n": len(new.records), "identity_ok": same,
+                 "fingerprint_match": fpo == fpn, "chunks_mean": ch.mean(),
+                 "chunks_max": int(ch.max()), "tokens_old": tk_o.mean(),
+                 "tokens_new": tk_n.mean(),
+                 "token_gain_pct": 100 * (tk_n.mean() / max(tk_o.mean(), 1) - 1)})
+ver = pd.DataFrame(rows)
+print(ver.round(3).to_string(index=False))
+if not ver.identity_ok.all():
+    raise SystemExit("record identity changed — NOT a single-variable intervention. STOP.")
+if not fp_ok:
+    raise SystemExit("fingerprint changed — the frozen plans are invalid; do not proceed "
+                     "with the committed baseline as comparator.")
+print("\nidentity + fingerprint verified: frozen plans valid, baseline comparator valid.")
+ver.to_csv(OUT / "phase7b_data_verification.csv", index=False)
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+tokenising train: 100%|██████████████████| 15566/15566 [02:05<00:00, 124.42it/s]
+  wrote /kaggle/working/pkl_mc4/psych_mimic4idx_train.pkl  (15,566 records)
+tokenising val: 100%|██████████████████████| 3383/3383 [00:25<00:00, 133.73it/s]
+  wrote /kaggle/working/pkl_mc4/psych_mimic4idx_val.pkl  (3,383 records)
+tokenising test: 100%|█████████████████████| 3450/3450 [00:25<00:00, 137.89it/s]
+  wrote /kaggle/working/pkl_mc4/psych_mimic4idx_test.pkl  (3,450 records)
+split     n  identity_ok  fingerprint_match  chunks_mean  chunks_max  tokens_old  tokens_new  token_gain_pct
+train 15566         True               True        3.937           4     511.819    1993.240         289.442
+  val  3383         True               True        3.939           4     511.942    1992.495         289.203
+ test  3450         True               True        3.945           4     511.964    2000.043         290.661
+
+identity + fingerprint verified: frozen plans valid, baseline comparator valid.
+Part 2 — memory preflight
+Before spending hours, measure one real training step at max_chunks=4 and see whether it fits.
+
+The measurement builds an actual episode through collate_episode, runs a forward and backward pass through the real PrototypicalModel under the same autocast settings train.py uses, and reads torch.cuda.max_memory_allocated(). The max_chunks=1 equivalent is measured the same way, so the ratio is observed rather than assumed.
+
+If it does not fit, the remedies in order of least to most invasive:
+
+Gradient checkpointing on the encoder — bert.gradient_checkpointing_enable(). Mathematically identical output and gradients; trades compute for memory. It does not change the experiment's variable. This is the recommended fix, and Part 3 can enable it via an environment flag without editing model.py.
+grad_accum — does not help here. Accumulation splits across optimiser steps, but the episode is a single forward; the peak is inside one episode.
+max_chunks=2 instead of 4 — still a real increase (~2× the text) and halves the peak. A legitimate fallback, but it changes the pre-registered intervention, so it must be recorded as such rather than quietly substituted.
+Reducing K or q is not an option: both are part of the frozen protocol and would break comparability with the baseline.
+
+# ---------------------------------------------------------------------------
+# 2.1  Measure peak memory for one REAL training step.
+#      Three configurations, each in its own subprocess-safe try/except so an
+#      OOM is a measurement result rather than a dead kernel.
+# ---------------------------------------------------------------------------
+from tcwpn.model import build_model
+from tcwpn.collate import collate_episode
+
+# the allocator hint the OOM message itself recommends; harmless if not needed
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
+def peak_step_memory(pkl_dir, label, grad_checkpoint=False):
+    """One forward+backward+step, exactly as train.py does it. Returns None on OOM."""
+    if DEVICE != "cuda":
+        return None
+    store = RecordStore.from_pkl(pkl_dir / f"{STEM}_train.pkl", split_name="train")
+    plan = EpisodePlan.load(PLAN_DIR / f"{STEM}_train_k{K}.json")
+    ep = list(plan)[0]
+    model = opt = batch = out = loss = None
+    try:
+        model = build_model(new_cfg["model"]).to(DEVICE)
+        if grad_checkpoint:
+            # use_reentrant=False is the robust variant: it does not require the
+            # segment inputs to carry requires_grad, and it preserves RNG state
+            # so dropout masks are identical on recompute. Gradients are the
+            # SAME as without checkpointing -- only activations are recomputed.
+            model.embedder.bert.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False})
+        model.train()
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-5)
+        try:
+            scaler = torch.amp.GradScaler("cuda", enabled=True)       # torch >= 2.4
+        except (AttributeError, TypeError):
+            scaler = torch.cuda.amp.GradScaler(enabled=True)          # older torch
+        torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+        batch = collate_episode(ep, store, torch.device(DEVICE))
+        n_seq = int(batch["support"]["input_ids"].shape[0] +
+                    batch["query"]["input_ids"].shape[0])
+        t0 = time.time()
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
+            out = model(batch)          # same call train.py makes
+            loss = out["loss"]
+        scaler.scale(loss).backward()
+        scaler.step(opt); scaler.update(); opt.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated() / 1e9
+        dt = time.time() - t0
+        print(f"{label:<34} seq/step {n_seq:>3} | peak {peak:5.2f} GB | step {dt:5.2f}s")
+        return {"label": label, "sequences": n_seq, "peak_gb": peak, "step_s": dt,
+                "grad_checkpoint": grad_checkpoint, "ok": True}
+    except torch.cuda.OutOfMemoryError as e:
+        msg = str(e).split(".")[0]
+        print(f"{label:<34} OUT OF MEMORY  ({msg})")
+        return {"label": label, "ok": False, "grad_checkpoint": grad_checkpoint}
+    finally:
+        for obj in ("loss", "out", "batch", "opt", "model"):
+            if locals().get(obj) is not None:
+                del obj
+        del model, opt, batch, out, loss
+        torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+
+if DEVICE == "cuda":
+    total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f"GPU total {total_gb:.2f} GB\n")
+    m1  = peak_step_memory(PKL_OLD,  "1 chunk  (baseline)")
+    m4  = peak_step_memory(PKL_MC4,  "4 chunks (no checkpointing)")
+    m4c = peak_step_memory(PKL_MC4,  "4 chunks + grad checkpointing", grad_checkpoint=True)
+
+    print()
+    if m4 and m4.get("ok"):
+        USE_GRAD_CHECKPOINT = (total_gb - m4["peak_gb"]) < 1.5
+        chosen = m4 if not USE_GRAD_CHECKPOINT else m4c
+        print("4 chunks fits without checkpointing"
+              if not USE_GRAD_CHECKPOINT else
+              "4 chunks fits but headroom is thin -> enable checkpointing")
+    elif m4c and m4c.get("ok"):
+        USE_GRAD_CHECKPOINT, chosen = True, m4c
+        print("=" * 78)
+        print("VERDICT: 4 chunks OOMs at full activation storage, but FITS with")
+        print("         gradient checkpointing. Part 3 will enable it automatically.")
+        print("=" * 78)
+        print("  Gradient checkpointing recomputes activations in the backward pass")
+        print("  instead of storing them. The gradients, and therefore the trained")
+        print("  model, are mathematically identical -- it costs time, not accuracy,")
+        print("  so the experiment remains single-variable.")
+    else:
+        USE_GRAD_CHECKPOINT, chosen = True, None
+        print("=" * 78)
+        print("VERDICT: 4 chunks does NOT fit even with checkpointing on this GPU.")
+        print("=" * 78)
+        print("  Options, in order of preference:")
+        print("   1. max_chunks=2 instead of 4 — still ~2x the text, half the peak.")
+        print("      This CHANGES the pre-registered intervention: record the change")
+        print("      and the reason before running, do not substitute it silently.")
+        print("   2. A larger GPU (A100/L4) outside Kaggle.")
+        print("  Do NOT reduce K or q — both are part of the frozen protocol and")
+        print("  would break comparability with the baseline.")
+
+    if m1 and chosen and chosen.get("ok"):
+        print(f"\nmemory {chosen['peak_gb']/m1['peak_gb']:.2f}x baseline | "
+              f"time {chosen['step_s']/m1['step_s']:.2f}x baseline")
+        est_min = chosen["step_s"] / m1["step_s"] * 47      # baseline manifest: ~47 min/seed
+        print(f"estimated ~{est_min:.0f} min/seed, ~{5*est_min/60:.1f} h for five seeds")
+        if est_min > 180:
+            print("  -> more than 3 h/seed. Run ONE seed per session (Part 3 resumes).")
+        if 5 * est_min / 60 > 25:
+            print("  -> approaching the ~30 h/week Kaggle GPU quota. Plan sessions.")
+    json.dump({"one_chunk": m1, "four_chunk": m4, "four_chunk_ckpt": m4c,
+               "total_gb": total_gb, "use_grad_checkpoint": bool(USE_GRAD_CHECKPOINT)},
+              open(OUT / "phase7b_preflight.json", "w"), indent=2)
+    print(f"\nUSE_GRAD_CHECKPOINT = {USE_GRAD_CHECKPOINT}   (Part 3 reads this)")
+else:
+    USE_GRAD_CHECKPOINT = False
+    print("no GPU — preflight skipped")
+GPU total 15.64 GB
+
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+1 chunk  (baseline)                seq/step  20 | peak  4.85 GB | step  1.54s
+4 chunks (no checkpointing)        OUT OF MEMORY  (CUDA out of memory)
+4 chunks + grad checkpointing      seq/step  78 | peak  3.09 GB | step  2.43s
+
+==============================================================================
+VERDICT: 4 chunks OOMs at full activation storage, but FITS with
+         gradient checkpointing. Part 3 will enable it automatically.
+==============================================================================
+  Gradient checkpointing recomputes activations in the backward pass
+  instead of storing them. The gradients, and therefore the trained
+  model, are mathematically identical -- it costs time, not accuracy,
+  so the experiment remains single-variable.
+
+memory 0.64x baseline | time 1.58x baseline
+estimated ~74 min/seed, ~6.2 h for five seeds
+
+USE_GRAD_CHECKPOINT = True   (Part 3 reads this)
+Part 3 — train, one seed at a time, resumable
+Each invocation trains the next unfinished seed and stops. Re-running the cell after a session restart picks up where it left off, because completion is judged by manifest.json on disk rather than by anything held in memory.
+
+USE_GRAD_CHECKPOINT sets TCWPN_GRAD_CHECKPOINT=1, which the cell applies by wrapping build_model through sitecustomize-style monkeypatching in a small launcher — no repository file is edited. Leave it off unless Part 2 said the run does not fit.
+
+The threshold continues to be locked on validation inside train.py. Nothing is selected on test.
+
+# ---------------------------------------------------------------------------
+# 3.1  Resumable training. Set RUN_TRAINING = True to execute one seed.
+# ---------------------------------------------------------------------------
+RUN_TRAINING = False          # True -> trains the next unfinished seed, then stops
+TRAIN_ALL_IN_SESSION = False  # True -> keep going until the session dies
+USE_GRAD_CHECKPOINT = globals().get("USE_GRAD_CHECKPOINT", False)  # set by Part 2
+
+def run_dir_for(seed):
+    return RESULTS / STEM / f"{RUN_TAG}_k{K}_seed{seed}"
+
+def done(seed):
+    d = run_dir_for(seed)
+    return (d / "manifest.json").exists() and (d / "best.pt").exists()
+
+status = {s: done(s) for s in SEEDS}
+print("training status:", {s: ("done" if v else "pending") for s, v in status.items()})
+pending = [s for s in SEEDS if not status[s]]
+print("pending:", pending if pending else "none — all five trained")
+
+launcher = Path("/kaggle/working/train_launch.py")
+launcher.write_text(
+    "import os, sys, torch\n"
+    f"sys.path.insert(0, {str(REPO/'src')!r})\n"
+    f"sys.path.insert(0, {str(REPO)!r})\n"
+    "if os.environ.get('TCWPN_GRAD_CHECKPOINT') == '1':\n"
+    "    import tcwpn.model as TM\n"
+    "    _orig = TM.build_model\n"
+    "    def build_model(cfg):\n"
+    "        m = _orig(cfg)\n"
+    "        try:\n"
+    "            m.embedder.bert.gradient_checkpointing_enable(\n"
+    "                gradient_checkpointing_kwargs={'use_reentrant': False})\n"
+    "            print('[launcher] gradient checkpointing ENABLED')\n"
+    "        except Exception as e:\n"
+    "            print('[launcher] could not enable checkpointing:', e)\n"
+    "        return m\n"
+    "    TM.build_model = build_model\n"
+    "import runpy\n"
+    "sys.argv = ['scripts.train'] + sys.argv[1:]\n"
+    "runpy.run_module('scripts.train', run_name='__main__')\n")
+
+def train_seed(seed):
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"),
+               PYTORCH_ALLOC_CONF="expandable_segments:True",
+               TCWPN_GRAD_CHECKPOINT="1" if USE_GRAD_CHECKPOINT else "0")
+    cmd = [sys.executable, str(launcher), "--config", str(NEW_CFG), "--k", str(K),
+           "--seed", str(seed), "--stem", STEM, "--pkl-dir", str(PKL_MC4),
+           "--plan-dir", str(PLAN_DIR), "--results", str(RESULTS)]
+    print("$ " + " ".join(cmd)); t0 = time.time()
+    subprocess.run(cmd, env=env, check=True)
+    print(f"seed {seed} finished in {(time.time()-t0)/60:.1f} min -> {run_dir_for(seed)}")
+
+if not RUN_TRAINING:
+    print("\nRUN_TRAINING is False — nothing trained. Commands that WOULD run:\n")
+    for s in pending:
+        print(f"  python {launcher} --config {NEW_CFG} --k {K} --seed {s} "
+              f"--stem {STEM} --pkl-dir {PKL_MC4} --plan-dir {PLAN_DIR} --results {RESULTS}")
+elif not pending:
+    print("\nall seeds already trained")
+else:
+    for s in (pending if TRAIN_ALL_IN_SESSION else pending[:1]):
+        train_seed(s)
+    print("\nremaining:", [s for s in SEEDS if not done(s)])
+    print("Commit this session, then re-run the notebook to continue.")
+training status: {42: 'pending', 43: 'pending', 44: 'pending', 45: 'pending', 46: 'pending'}
+pending: [42, 43, 44, 45, 46]
+
+RUN_TRAINING is False — nothing trained. Commands that WOULD run:
+
+  python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 42 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4 --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results
+  python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 43 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4 --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results
+  python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 44 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4 --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results
+  python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 45 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4 --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results
+  python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 46 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4 --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results
+# ---------------------------------------------------------------------------
+# 3.2  Evaluate every trained seed on the frozen test plan.
+#      Run directories are RESOLVED, never guessed from a placeholder.
+# ---------------------------------------------------------------------------
+RUN_EVAL = False
+trained = [s for s in SEEDS if done(s)]
+print("trained seeds:", trained if trained else "none yet")
+
+for s in trained:
+    d = run_dir_for(s)
+    print(f"  seed {s}: {d}  eval_test.json={'yes' if (d/'eval_test.json').exists() else 'NO'}")
+
+if RUN_EVAL and trained:
+    for s in trained:
+        d = run_dir_for(s)
+        if (d / "eval_test.json").exists():
+            print(f"seed {s}: already evaluated, skipping"); continue
+        cmd = [sys.executable, "-m", "scripts.evaluate", "--run", str(d), "--split", "test",
+               "--pkl-dir", str(PKL_MC4), "--plan-dir", str(PLAN_DIR), "--bootstrap", "2000"]
+        print("$ " + " ".join(cmd))
+        subprocess.run(cmd, env=dict(os.environ, PYTHONPATH="src"), check=True)
+elif not RUN_EVAL:
+    print("\nRUN_EVAL is False. Commands that WOULD run:")
+    for s in trained:
+        print(f"  python -m scripts.evaluate --run {run_dir_for(s)} --split test "
+              f"--pkl-dir {PKL_MC4} --plan-dir {PLAN_DIR} --bootstrap 2000")
+trained seeds: none yet
+
+RUN_EVAL is False. Commands that WOULD run:
+Part 4 — paired comparison and the pre-registered decision
+Both models are scored on byte-identical episodes from the same frozen plans, which is what makes the pairing valid — and what Part 1.2 re-verified via the fingerprint.
+
+If the five seeds are not all present, the cell says so and refuses to compute a headline. Partial results are printed only as progress, never as an answer.
+
+# ---------------------------------------------------------------------------
+# 4.1  Paired analysis. No headline unless all five seeds exist.
+# ---------------------------------------------------------------------------
+from scipy import stats
+MDE = 0.020   # pre-specified minimum practically meaningful improvement,
+              # informed by the baseline's observed seed-to-seed variability
+              # (aux_only range 0.7233-0.7432 = 0.0199). It is a practical
+              # threshold, NOT a definition of statistical noise.
+
+new_auroc = {}
+for s in SEEDS:
+    f = run_dir_for(s) / "eval_test.json"
+    if f.exists():
+        new_auroc[s] = float(json.loads(f.read_text())["metrics"]["auroc"])
+
+print(f"new seeds available: {sorted(new_auroc)}  ({len(new_auroc)}/{len(SEEDS)})")
+if new_auroc:
+    print("\nprogress only — NOT a result until all five are in:")
+    for s in sorted(new_auroc):
+        print(f"   seed {s}: baseline {BASELINE[s]:.4f} -> mc4 {new_auroc[s]:.4f}  "
+              f"({new_auroc[s]-BASELINE[s]:+.4f})")
+
+if len(new_auroc) < len(SEEDS):
+    print(f"\nSTOP: {len(SEEDS)-len(new_auroc)} seed(s) missing. Do not report a conclusion.")
+    print("Tell the supervisor: 'the intervention is prepared and verified; the")
+    print("retraining is in progress; I cannot yet say whether it helps.'")
+else:
+    base = np.array([BASELINE[s] for s in SEEDS], float)
+    new = np.array([new_auroc[s] for s in SEEDS], float)
+    d = new - base
+    t_p = float(stats.ttest_rel(new, base).pvalue)
+    w_p = float(stats.wilcoxon(new, base).pvalue)
+    dz = float(d.mean() / d.std(ddof=1)) if d.std(ddof=1) > 0 else float("nan")
+    better = int((d > 0).sum())
+
+    print("\n" + "=" * 78)
+    print("PAIRED RESULT — tcwpn_full (max_chunks=1) vs tcwpn_full_mc4 (max_chunks=4)")
+    print("=" * 78)
+    print(f"  baseline mean {base.mean():.4f} +/- {base.std(ddof=1):.4f}")
+    print(f"  mc4      mean {new.mean():.4f} +/- {new.std(ddof=1):.4f}")
+    print(f"  mean delta    {d.mean():+.4f}   median {np.median(d):+.4f}")
+    print(f"  seeds better  {better}/{len(d)}")
+    print(f"  paired t p    {t_p:.4f}    wilcoxon p {w_p:.4f}    Cohen's dz {dz:.3f}")
+
+    c1, c2, c3 = d.mean() >= MDE, t_p < 0.05, better >= 4
+    success = c1 and c2 and c3
+    print(f"\n  mean delta >= +{MDE:.3f} : {c1}")
+    print(f"  paired p < 0.05      : {c2}")
+    print(f"  >= 4/5 seeds improve : {c3}")
+    print(f"\n  PRE-REGISTERED DECISION: {'SUCCESS' if success else 'NO EFFECT'}")
+    if not success and d.mean() > 0:
+        print("\n  Note: a positive mean delta below the pre-specified threshold is an")
+        print("  improvement that did not reach the bar set in advance. Report both the")
+        print("  delta and the rule; do not restate the rule to fit the number.")
+    json.dump({"seeds": SEEDS, "baseline": BASELINE, "mc4": new_auroc,
+               "mean_delta": float(d.mean()), "median_delta": float(np.median(d)),
+               "seeds_better": better, "paired_t_p": t_p, "wilcoxon_p": w_p,
+               "cohens_dz": dz, "success": bool(success),
+               "rule": {"MDE": MDE, "alpha": 0.05, "min_seeds_better": 4}},
+              open(OUT / "phase7b_result.json", "w"), indent=2)
+
+    print("\nSeed-42 DeLong on the paired patient vectors:")
+    a = run_dir_for(42) / "predictions_test.csv"
+    b = BASE_RUNS.get(42, Path("<frozen_seed42>")) / "predictions_test.csv"
+    print(f"   python -m scripts.compare_models pair --a {a} --b {b}")
+new seeds available: []  (0/5)
+
+STOP: 5 seed(s) missing. Do not report a conclusion.
+Tell the supervisor: 'the intervention is prepared and verified; the
+retraining is in progress; I cannot yet say whether it helps.'
+Part 5 — if it improves, check the improvement is not just lexical
+Only relevant if Part 4 says SUCCESS, and the reason is specific. The blinded arm already shows 0.7379 → 0.6284 when anxiety terms are removed, so roughly 46% of the above-chance margin is lexical. A longer window mechanically exposes more anxiety vocabulary, so an AUROC gain from max_chunks=4 could be the model reading more explicit anxiety words rather than reasoning better over clinical context.
+
+Those are different claims and the paper must not conflate them:
+
+max_chunks=4 -> AUROC improves -> because more anxiety-explicit wording is now visible
+max_chunks=4 -> AUROC improves -> because of better clinical reasoning
+The test: rebuild the 4-chunk pkl with --blind anxiety, retrain, and compare the blinded gain against the baseline's blinded 0.6284. If the gain survives blinding it is contextual; if it disappears it is lexical, and that must be stated.
+
+This is a second experiment with its own five seeds. Do not start it until Part 4 has a verdict.
+
+# ---------------------------------------------------------------------------
+# 5.1  Blinded follow-up — commands only; do not run before Part 4 concludes.
+# ---------------------------------------------------------------------------
+BLIND_PKL = Path("/kaggle/working/pkl_mc4_blind")
+print("Only if Part 4 == SUCCESS:\n")
+print(f"python -m scripts.tokenize_cohort --cohort {COHORT_CSV} \\")
+print(f"    --out {BLIND_PKL} --max-chunks {MAX_CHUNKS_NEW} --blind anxiety")
+print()
+for s in SEEDS:
+    print(f"python {Path('/kaggle/working/train_launch.py')} --config {NEW_CFG} --k {K} "
+          f"--seed {s} --stem {STEM} --pkl-dir {BLIND_PKL} --plan-dir {PLAN_DIR} "
+          f"--results /kaggle/working/results_blind")
+print("\nCompare the blinded mc4 mean against the baseline's blinded 0.6284.")
+print("  gain survives blinding  -> the extra context carries non-lexical signal")
+print("  gain disappears         -> the improvement is lexical; say so explicitly")
+Only if Part 4 == SUCCESS:
+
+python -m scripts.tokenize_cohort --cohort /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/cohort_psych_mimic4idx.csv \
+    --out /kaggle/working/pkl_mc4_blind --max-chunks 4 --blind anxiety
+
+python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 42 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4_blind --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results_blind
+python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 43 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4_blind --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results_blind
+python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 44 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4_blind --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results_blind
+python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 45 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4_blind --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results_blind
+python /kaggle/working/train_launch.py --config configs/tcwpn_full_mc4.yaml --k 5 --seed 46 --stem psych_mimic4idx --pkl-dir /kaggle/working/pkl_mc4_blind --plan-dir /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/plans --results /kaggle/working/results_blind
+
+Compare the blinded mc4 mean against the baseline's blinded 0.6284.
+  gain survives blinding  -> the extra context carries non-lexical signal
+  gain disappears         -> the improvement is lexical; say so explicitly
+What to tell the supervisor
+If you meet him before the seeds finish, this is the truthful position:
+
+Sir, we completed the error analysis and the root-cause validation. We then designed the first controlled intervention — changing only the ClinicalBERT input context from one 512-token chunk to four. We verified that the cohort, labels, note IDs and episode plans are unchanged, and the new tokenized data now carries 289% more text per note. I have not yet completed the five retraining runs, so I cannot claim the performance improved. The next step is to train seeds 42–46 and compare against the existing five-seed baseline.
+
+Do not say max_chunks=4 improved anything. Zero models have been trained.
+
+Three fixes in this notebook that Phase 7 needed before it could run:
+
+The new runs would have written to tcwpn_full_k5_seed* — the same directories as the frozen baseline — because train.py names run directories from cfg['name'], not the config filename. The baseline would have been overwritten and the comparison would have been the new model against itself. Fixed with configs/tcwpn_full_mc4.yaml, verified identical except the label, and the baseline is now imported outside the results tree entirely.
+Phase 7's discovery glob looked for *mc*_k5_seed*, which no run directory would ever have matched — it would have reported 0/5 new seeds even after five successful runs. Run directories are now resolved, not guessed.
+Memory and wall-clock are measured before committing hours, since an episode now encodes up to 80 sequences of 512 tokens instead of 20.
+On the noise wording, the review is right and it is worth saying correctly: 0.0199 is the baseline's observed seed spread, not a definition of statistical noise. The rule is unchanged — +0.020 as a pre-specified minimum practically meaningful improvement, informed by that variability.
+
+The three legitimate outcomes, all reportable:
+
+outcome	what it means
+mean Δ ≥ +0.020, p < 0.05, ≥4/5 seeds	longer context is a demonstrated intervention — then run Part 5
+small positive Δ below the bar	more context helps somewhat, below the pre-set threshold
+Δ ≈ 0	the 512-token ceiling is real but not the cause of the 0.7379
+The third is not a failure. It answers a question the supervisor asked, and it is only credible because the threshold was fixed in advance.
+
+If it shows no effect, do not change five things. The next question is the fundamental one: whether the few-shot formulation fits a dataset with 10 290 labelled training patients. That is a research question about the framing, not another hyper-parameter.

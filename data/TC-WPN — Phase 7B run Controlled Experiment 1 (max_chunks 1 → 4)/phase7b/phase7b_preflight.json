@@ -1,0 +1,25 @@
+{
+  "one_chunk": {
+    "label": "1 chunk  (baseline)",
+    "sequences": 20,
+    "peak_gb": 4.85098752,
+    "step_s": 1.5403990745544434,
+    "grad_checkpoint": false,
+    "ok": true
+  },
+  "four_chunk": {
+    "label": "4 chunks (no checkpointing)",
+    "ok": false,
+    "grad_checkpoint": false
+  },
+  "four_chunk_ckpt": {
+    "label": "4 chunks + grad checkpointing",
+    "sequences": 78,
+    "peak_gb": 3.085368832,
+    "step_s": 2.4296326637268066,
+    "grad_checkpoint": true,
+    "ok": true
+  },
+  "total_gb": 15.636037632,
+  "use_grad_checkpoint": true
+}
