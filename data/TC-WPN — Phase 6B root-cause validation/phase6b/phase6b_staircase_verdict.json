@@ -1,0 +1,9 @@
+{
+  "S0_pretrained_768": 0.6307081360739898,
+  "S1_finetuned_768": 0.7687800882922834,
+  "S2_projection_256": 0.7611194342901659,
+  "S3_tcwpn": 0.7378861788617885,
+  "flags": [
+    "PROTOTYPE_STAGE_ADDS_LITTLE"
+  ]
+}

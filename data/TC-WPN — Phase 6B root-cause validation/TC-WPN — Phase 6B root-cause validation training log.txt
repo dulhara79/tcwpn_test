@@ -1,0 +1,1547 @@
+TC-WPN — Phase 6B: root-cause validation
+Component: R26-DS-012 / TC-WPN — Dulhara Kaushalya (IT22130648)
+
+Phase 6 ran successfully and its geometry pass reproduced predictions_test.csv to 1.788 × 10⁻⁷. The review that followed accepted the diagnostic process but rejected the automatic EMBEDDING_AND_MODEL verdict and named exactly three things to fix before any model or data change. This notebook does those three, plus the truncation check the workflow diagram adds:
+
+1. Validate anx_coded_this_adm and its train/val/test provenance. 2. Perform patient-level note contribution analysis for FP/FN. 3. Isolate ClinicalBERT 768 → projection 256 → ProtoNet so we know exactly where representation quality is being lost. 4. Verify truncation effect.
+
+And the standing instruction that governs all of it:
+
+"Do not ask Claude to modify TC-WPN yet."
+
+So: nothing here changes model.py, train.py, sampler.py, tokenize_cohort.py, or any config. Nothing is retrained. Every cell is diagnostic.
+
+What Phase 6 actually established (frozen, carried forward)
+finding	number
+test AUROC, tcwpn_full_k5_seed42	0.7379 (2 278 patients, threshold 0.26931)
+train / val / test AUROC	0.7958* / 0.7526 / 0.7379 — gap +0.0579, not catastrophic overfitting
+k-NN error clustering enrichment	1.1637 vs a 1.5 pre-registered floor → no strong error stratum
+temporal characteristics	all	Cliff's δ	< 0.04, Holm p = 1.0 → recency does not explain errors
+centroid AUROC, pooled 768-d	0.7204 (silhouette 0.0743, k-NN purity 0.6120)
+centroid AUROC, projection 256-d	0.7172 (silhouette 0.1336, k-NN purity 0.6068)
+weighting counterfactual	weighted 0.7379 vs uniform 0.7369 → Δ = +0.0009
+decision flip rate (errors)	6.24%
+*400 of 3 000 training episodes — a discrimination estimate, not full training-set performance.
+
+The four issues this notebook fixes
+Issue 1 — the anx_coded_this_adm NaN is a code bug, not a data limitation. Phase 6 reported train = NaN, val = NaN, test = 0.367 and concluded underrepresented_in_train = False. The review is right that this does not demonstrate anything. Part A shows the NaN comes from a lookup table in flag_rates that has no branch for this column, computes the coverage properly, and then asks the question that actually matters: where does the feature come from?
+
+Issue 2 — patient-level verdicts were attached to every one of a patient's notes. A patient pooled from three notes at p = 0.05 / 0.08 / 0.43 is an FN, but note C is not an FN note. Part B computes each note's actual contribution and identifies which notes move a patient across the decision.
+
+Issue 3 — 0.7172 comes from the already-trained projection. It cannot separate ClinicalBERT from pooling, projection, and the training objective. Part C evaluates the staircase stage by stage at the patient level, so every number is comparable to 0.7379.
+
+Issue 4 — the MODEL branch fired on a 6.24% flip rate while ΔAUROC was +0.0009. The rule used OR; a mechanism can change 5% of decisions and improve discrimination by nothing. Part E re-derives the verdict with the effect-size requirement restored.
+
+Inputs to attach
+input	why
+Stage A output	pkl/, plans/, cohort_psych_mimic4idx.csv (the only carrier of note text)
+Stage C / Phase 3B output	best.pt + manifest.json for tcwpn_full_k5_seed42
+Phase 6 output	phase6_note_geometry.csv, error_analysis.csv, note_error_table_with_characteristics.csv
+Accelerator: GPU T4 x2 — not P100. Kaggle's PyTorch is built for sm_70+; P100 is sm_60, so torch.cuda.is_available() returns True while every kernel fails. Cell 0.1 checks get_arch_list() and runs a real kernel before trusting the device.
+
+MIMIC-IV DUA: note excerpts printed here stay in the session.
+
+# ---------------------------------------------------------------------------
+# 0.0  Repo + dependencies. Internet ON. Nothing existing is modified.
+# ---------------------------------------------------------------------------
+!rm -rf /kaggle/working/tcwpn_test
+!git clone -q https://github.com/dulhara79/tcwpn_test.git /kaggle/working/tcwpn_test
+%cd /kaggle/working/tcwpn_test
+!git log --oneline -1
+!pip install -q -r requirements.txt 2>&1 | tail -2
+
+import os, sys
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+sys.path.insert(0, "/kaggle/working/tcwpn_test/src")
+
+import torch
+print("torch", torch.__version__)
+/kaggle/working/tcwpn_test
+ca7b716 (HEAD -> main, origin/main, origin/HEAD) Develop/update workflow (#3)
+torch 2.10.0+cu128
+# ---------------------------------------------------------------------------
+# 0.1  Device guard + locate inputs.
+# ---------------------------------------------------------------------------
+import glob, json, shutil, re
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+STEM, K, SEED = "psych_mimic4idx", 5, 42
+RUN_NAME = f"tcwpn_full_k{K}_seed{SEED}"
+OUT = Path("/kaggle/working/phase6b"); OUT.mkdir(parents=True, exist_ok=True)
+ALLOW_CPU_FALLBACK = False
+
+def resolve_device():
+    if not torch.cuda.is_available():
+        return "cpu"
+    cap = torch.cuda.get_device_capability(0)
+    sm = f"sm_{cap[0]}{cap[1]}"
+    arches = list(torch.cuda.get_arch_list())
+    print(f"GPU   : {torch.cuda.get_device_name(0)} ({sm})")
+    print(f"build : {', '.join(arches) or 'unknown'}")
+    if arches and sm not in arches:
+        print(f"  {sm} NOT supported by this PyTorch build.")
+        return "unsupported_gpu"
+    try:
+        (torch.zeros(8, 8, device="cuda") @ torch.zeros(8, 8, device="cuda")).sum().item()
+        torch.cuda.synchronize()
+    except Exception as e:
+        print(f"  kernel test FAILED: {type(e).__name__}: {e}")
+        return "unsupported_gpu"
+    return "cuda"
+
+_d = resolve_device()
+if _d == "unsupported_gpu":
+    print("\nSWITCH ACCELERATOR TO 'GPU T4 x2' AND RE-RUN (Settings -> Accelerator).")
+    if not ALLOW_CPU_FALLBACK:
+        raise SystemExit("unsupported GPU architecture")
+    DEVICE = "cpu"
+else:
+    DEVICE = _d
+print("DEVICE:", DEVICE)
+
+# ---- Stage A ---------------------------------------------------------------
+stage_a = next((p.parent for p in Path("/kaggle/input").rglob("plans")
+                if (p.parent / "pkl").exists()), None)
+if stage_a is None:
+    raise SystemExit("Stage A dataset not found (needs pkl/ and plans/ side by side)")
+PKL_DIR, PLAN_DIR = stage_a / "pkl", stage_a / "plans"
+
+hits = sorted(Path("/kaggle/input").rglob(f"cohort_{STEM}.csv"))
+if not hits:
+    raise SystemExit(f"cohort_{STEM}.csv not found — it is the only carrier of note text")
+COHORT_CSV = hits[0]
+
+# ---- run directory: needs BOTH manifest.json and best.pt --------------------
+RESULTS = Path("/kaggle/working/results") / STEM
+
+def import_run(name):
+    complete = [d for d in Path("/kaggle/input").rglob(name)
+                if d.is_dir() and (d / "manifest.json").exists() and (d / "best.pt").exists()]
+    if not complete:
+        print(f"[IMPORT] {name}: no directory has BOTH manifest.json and best.pt")
+        for d in Path("/kaggle/input").rglob(name):
+            if d.is_dir():
+                print(f"   incomplete: {d} -> {sorted(p.name for p in d.iterdir() if p.is_file())}")
+        return None
+    complete.sort(key=lambda d: (d / "best.pt").stat().st_size, reverse=True)
+    src = complete[0]
+    dst = RESULTS / name; dst.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        if f.is_file():
+            shutil.copy2(f, dst / f.name)
+    print(f"[IMPORT] {name} <- {src}")
+    print(f"         {sorted(p.name for p in dst.iterdir())}")
+    return dst
+
+RUN_DIR = import_run(RUN_NAME)
+if RUN_DIR is None:
+    raise SystemExit(f"{RUN_NAME}: attach the Stage C / Phase 3B output holding best.pt")
+
+# ---- Phase 6 outputs (optional but preferred) ------------------------------
+def find_p6(fname):
+    h = sorted(Path("/kaggle/input").rglob(fname))
+    return h[0] if h else None
+
+P6_GEOM = find_p6("phase6_note_geometry.csv")
+P6_ERR  = find_p6("error_analysis.csv")
+P6_CHAR = find_p6("note_error_table_with_characteristics.csv")
+print("\nphase6 note geometry :", P6_GEOM)
+print("phase6 error_analysis:", P6_ERR)
+print("phase6 characteristics:", P6_CHAR)
+print("\nstage A   :", stage_a)
+print("cohort CSV:", COHORT_CSV)
+GPU   : Tesla T4 (sm_75)
+build : sm_70, sm_75, sm_80, sm_86, sm_90, sm_100, sm_120
+DEVICE: cuda
+[IMPORT] tcwpn_full_k5_seed42 <- /kaggle/input/notebooks/dulharakaushalya/tc-wpn-phase-6-error-analysis-and-root-cause-di/results/psych_mimic4idx/tcwpn_full_k5_seed42
+         ['best.pt', 'eval_test.json', 'eval_test_blind-anx_meds.json', 'eval_test_blind-anxiety.json', 'manifest.json', 'predictions_test.csv', 'predictions_test_blind-anx_meds.csv', 'predictions_test_blind-anxiety.csv']
+
+phase6 note geometry : /kaggle/input/notebooks/dulharakaushalya/tc-wpn-phase-6-error-analysis-and-root-cause-di/phase6/phase6_note_geometry.csv
+phase6 error_analysis: /kaggle/input/notebooks/dulharakaushalya/tc-wpn-phase-6-error-analysis-and-root-cause-di/phase6/error_analysis.csv
+phase6 characteristics: /kaggle/input/notebooks/dulharakaushalya/tc-wpn-phase-6-error-analysis-and-root-cause-di/phase6/note_error_table_with_characteristics.csv
+
+stage A   : /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean
+cohort CSV: /kaggle/input/datasets/dulharakaushalya/tc-wpn-stage-a-data/data/clean/cohort_psych_mimic4idx.csv
+Part A — anx_coded_this_adm: provenance and coverage
+The review's position, which this part tests rather than assumes:
+
+"anx_coded_this_adm strongly separates correct from incorrect patients in the test analysis, but its training/validation prevalence could not be established by the current Phase 6 coverage calculation."
+
+and the five questions attached to it:
+
+Where does anx_coded_this_adm come from?
+Is it legitimately available for every train/validation/test record?
+Why is it populated in the test analysis but NaN for train/validation?
+Is it based on ICD information available at index time?
+Does using it for error diagnosis introduce label leakage or post-index information?
+Question 3 is answered first, because it turns out not to be a data problem at all. The Phase 6 coverage cell contained:
+
+for c in cols:
+    if   c == "has_anx_term_seen":        out[c] = ...
+    elif c == "has_med_term_seen":        out[c] = ...
+    elif c == "has_psych_term_seen":      out[c] = ...
+    elif c == "has_indirect_term_seen":   out[c] = ...
+    elif c == "indirect_only_no_direct":  out[c] = ...
+    else:                                 out[c] = np.nan      # <-- anx_coded_this_adm lands here
+flag_rates was written to measure text-derived regex flags on raw note text. It has no branch for anx_coded_this_adm, which is not a regex flag at all but a boolean column already present in the cohort CSV. Every candidate that is not one of those five names returns np.nan by construction. The training log confirms the column is in the cohort schema for all splits:
+
+note_id, subject_id, hadm_id, charttime, note_source, label, arm, split, gender, age, ...,
+n_notes_patient, is_patient_last_note, anx_coded_this_adm, text, ...
+So the correct statement is not "the feature is missing in train/val". It is: the coverage function never looked at it. The cells below compute it properly — and then ask whether it should have been a candidate stratum in the first place.
+
+# ---------------------------------------------------------------------------
+# A1. Reproduce the NaN, then show why it happened.
+# ---------------------------------------------------------------------------
+cohort = pd.read_csv(COHORT_CSV, low_memory=False)
+cohort["note_id"] = cohort["note_id"].astype(str)
+cohort["subject_id"] = cohort["subject_id"].astype(str)
+
+print("cohort columns:")
+print("   " + ", ".join(cohort.columns))
+print(f"\nrows: {len(cohort):,}")
+
+col = "anx_coded_this_adm"
+print(f"\n'{col}' present in cohort CSV : {col in cohort.columns}")
+if col not in cohort.columns:
+    raise SystemExit(f"{col} absent — Part A cannot run against this cohort file")
+
+print(f"dtype                          : {cohort[col].dtype}")
+print(f"null values                    : {int(cohort[col].isna().sum()):,} "
+      f"({cohort[col].isna().mean():.4%})")
+print(f"distinct values                : {sorted(cohort[col].dropna().unique().tolist())[:5]}")
+
+print("\nnon-null count PER SPLIT (the question Phase 6 could not answer):")
+print(cohort.groupby("split")[col].agg(n="size", non_null="count",
+                                       nulls=lambda s: int(s.isna().sum())).to_string())
+print("\nIf non_null == n for train and val, the NaN in Phase 6 was NOT missing data.")
+cohort columns:
+   note_id, subject_id, hadm_id, charttime, note_source, label, arm, split, gender, age, days_before_last_note_preindex, days_since_patient_first_note, note_index_within_patient, n_notes_patient, is_patient_last_note, anx_coded_this_adm, text, days_before_patient_last_note_raw, index_hadm_id, index_admittime, index_dischtime, index_ordinal, n_admissions_patient, index_rule, days_before_index, days_before_patient_last_note
+
+rows: 22,399
+
+'anx_coded_this_adm' present in cohort CSV : True
+dtype                          : bool
+null values                    : 0 (0.0000%)
+distinct values                : [False, True]
+
+non-null count PER SPLIT (the question Phase 6 could not answer):
+           n  non_null  nulls
+split                        
+test    3450      3450      0
+train  15566     15566      0
+val     3383      3383      0
+
+If non_null == n for train and val, the NaN in Phase 6 was NOT missing data.
+# ---------------------------------------------------------------------------
+# A2. Provenance, read from the source that creates the column.
+# ---------------------------------------------------------------------------
+src_build = Path("scripts/build_clean_cohort.py").read_text()
+src_coh   = Path("src/tcwpn/cohort.py").read_text()
+
+print("=" * 78)
+print("WHERE IT COMES FROM  (scripts/build_clean_cohort.py)")
+print("=" * 78)
+for i, line in enumerate(src_build.split("\n"), 1):
+    if "anx_coded_this_adm" in line or "anxiety_admissions" in line:
+        print(f"  {i:>4}| {line.strip()}")
+
+print("\n" + "=" * 78)
+print("WHAT IT IS  (src/tcwpn/cohort.py :: anxiety_admissions)")
+print("=" * 78)
+m = re.search(r"def anxiety_admissions.*?(?=\ndef )", src_coh, flags=re.S)
+if m:
+    for line in m.group(0).rstrip().split("\n"):
+        print("  " + line)
+
+print("\n" + "=" * 78)
+print("HOW THE LABEL IS BUILT  (same diagnoses table)")
+print("=" * 78)
+m2 = re.search(r"per_patient\[.arm.\].*?return per_patient", src_coh, flags=re.S)
+if m2:
+    for line in m2.group(0).rstrip().split("\n"):
+        print("  " + line)
+
+print("\nREADING:")
+print("  anx_coded_this_adm = hadm_id in {admissions with an anxiety ICD code}")
+print("  label(case)        = patient has an anxiety ICD code (same flag_diagnoses call)")
+print("  Both are derived from the SAME diagnoses table by the SAME anxiety-code flag.")
+print("  The docstring in cohort.py states it is reporting metadata that")
+print("  'must never be used to filter the validation or test set'.")
+==============================================================================
+WHERE IT COMES FROM  (scripts/build_clean_cohort.py)
+==============================================================================
+   335| anx_hadms = C.anxiety_admissions(diagnoses)
+   336| notes["anx_coded_this_adm"] = notes["hadm_id"].isin(anx_hadms)
+   355| "anx_coded_this_adm", "text",
+
+==============================================================================
+WHAT IT IS  (src/tcwpn/cohort.py :: anxiety_admissions)
+==============================================================================
+  def anxiety_admissions(diagnoses: pd.DataFrame) -> set:
+      """
+      hadm_ids in which an anxiety code was recorded. Used ONLY as reporting
+      metadata (`anx_coded_this_adm`) so the paper can describe how many notes
+      come from an admission where anxiety was actually coded. It must never be
+      used to filter the validation or test set.
+      """
+      d = flag_diagnoses(diagnoses)
+      return set(d.loc[d["is_anxiety"], "hadm_id"].dropna().unique())
+
+==============================================================================
+HOW THE LABEL IS BUILT  (same diagnoses table)
+==============================================================================
+  per_patient["arm"] = per_patient.apply(assign, axis=1)
+      per_patient["label"] = per_patient["arm"].map(
+          {"case": 1, "psych_control": 0, "clean_control": 0, "excluded": -1}
+      )
+      return per_patient
+
+READING:
+  anx_coded_this_adm = hadm_id in {admissions with an anxiety ICD code}
+  label(case)        = patient has an anxiety ICD code (same flag_diagnoses call)
+  Both are derived from the SAME diagnoses table by the SAME anxiety-code flag.
+  The docstring in cohort.py states it is reporting metadata that
+  'must never be used to filter the validation or test set'.
+# ---------------------------------------------------------------------------
+# A3. The coverage table Phase 6 should have produced.
+# ---------------------------------------------------------------------------
+cohort[col] = cohort[col].astype(str).str.strip().str.lower().map(
+    {"true": True, "false": False, "1": True, "0": False}).astype("boolean")
+print(f"coerced to boolean; nulls after coercion: {int(cohort[col].isna().sum())}")
+
+cov = (cohort.groupby("split")[col]
+       .agg(n_notes="size", rate="mean")
+       .reindex(["train", "val", "test"]))
+cov["rate"] = cov["rate"].astype(float)
+cov["over_test"] = cov["rate"] / cov.loc["test", "rate"]
+print("\nCORRECTED COVERAGE (note level, all splits):")
+print(cov.round(4).to_string())
+
+pat = (
+    cohort.groupby(["split", "subject_id"])
+    .agg(
+        label=("label", "first"),
+        any_coded=(col, "max"),
+    )
+    .reset_index()
+)
+
+covp = (
+    pat.groupby("split")["any_coded"]
+    .agg(
+        n_patients="size",
+        rate="mean",
+    )
+    .reindex(["train", "val", "test"])
+)
+
+covp["rate"] = covp["rate"].astype(float)
+covp["over_test"] = covp["rate"] / covp.loc["test", "rate"]
+
+print("\nCORRECTED COVERAGE (patient level — the unit the model is scored on):")
+print(covp.round(4).to_string())
+
+UNDERREP = bool(
+    (cov["over_test"] < 0.8).any()
+    or (covp["over_test"] < 0.8).any()
+)
+
+print(f"\nunderrepresented in train (ratio < 0.8, either unit): {UNDERREP}")
+
+cov.to_csv(OUT / "phase6b_anx_coded_coverage_notes.csv")
+covp.to_csv(OUT / "phase6b_anx_coded_coverage_patients.csv")
+coerced to boolean; nulls after coercion: 0
+
+CORRECTED COVERAGE (note level, all splits):
+       n_notes    rate  over_test
+split                            
+train    15566  0.3507     1.0368
+val       3383  0.3405     1.0067
+test      3450  0.3383     1.0000
+
+CORRECTED COVERAGE (patient level — the unit the model is scored on):
+       n_patients    rate  over_test
+split                               
+train       10290  0.5305     1.0356
+val          2231  0.5164     1.0079
+test         2278  0.5123     1.0000
+
+underrepresented in train (ratio < 0.8, either unit): False
+# ---------------------------------------------------------------------------
+# A4. The decisive test: is this a clinical characteristic or a label restatement?
+# ---------------------------------------------------------------------------
+print("P(anx_coded_this_adm | label) per split, NOTE level:")
+ct = cohort.pivot_table(index="split", columns="label", values=col, aggfunc="mean")
+print(ct.reindex(["train", "val", "test"]).round(4).to_string())
+
+print("\nP(any note anx-coded | label) per split, PATIENT level:")
+ctp = pat.pivot_table(index="split", columns="label", values="any_coded", aggfunc="mean")
+print(ctp.reindex(["train", "val", "test"]).round(4).to_string())
+
+p_ctrl = float(np.nanmax(ct[0].values)) if 0 in ct.columns else np.nan
+p_case = float(np.nanmean(ct[1].values)) if 1 in ct.columns else np.nan
+print(f"\nmax P(coded | control) across splits : {p_ctrl:.6f}")
+print(f"mean P(coded | case)    across splits : {p_case:.6f}")
+
+LABEL_DERIVED = bool(p_ctrl < 0.01)
+print("\n" + "=" * 78)
+if LABEL_DERIVED:
+    print("VERDICT: anx_coded_this_adm IS A PROJECTION OF THE LABEL, NOT A TEXT CHARACTERISTIC")
+    print("=" * 78)
+    print("  P(coded | control) is ~0 by construction: a control is a patient with NO")
+    print("  anxiety ICD code anywhere, so no admission of theirs can carry one.")
+    print("  The variable is therefore  (label == 1) AND (coded on this admission).")
+    print("  Its large Cliff's delta in Phase 6 (-0.5587, incorrect 0.0978 vs correct")
+    print("  0.6565) is largely a restatement of 'the model gets cases right more often")
+    print("  when the anxiety code is on the index admission' -- not the discovery of a")
+    print("  rare note type.")
+    print("\n  CONSEQUENCES:")
+    print("   1. It must be REMOVED from the candidate-strata set. Part E does that.")
+    print("   2. It must NOT be used to rebalance training data. Sampling on it would")
+    print("      be sampling on the label.")
+    print("   3. It remains legitimate as DESCRIPTIVE reporting metadata, which is")
+    print("      exactly what cohort.py's docstring says it is for.")
+else:
+    print("VERDICT: controls DO carry anx_coded_this_adm; it is not a pure label projection.")
+    print("=" * 78)
+    print("  Treat it as a genuine admission-level characteristic and keep it as a")
+    print("  candidate stratum, but answer question 4 (index-time availability) before")
+    print("  using it to alter training.")
+
+print("\n" + "-" * 78)
+print("QUESTION 4 — is it based on information available at index time?")
+print("-" * 78)
+print("  anx_coded_this_adm is attached by hadm_id. Under the at_or_before index policy")
+print("  a note's admission is at or before the index discharge, so the code is not")
+print("  post-index. But the LABEL is built from the patient's diagnoses across the")
+print("  whole record, so the two are not independent regardless of timing.")
+print("  Timing is not the problem here; shared derivation is.")
+
+json.dump({"p_coded_given_control_max": p_ctrl, "p_coded_given_case_mean": p_case,
+           "label_derived": LABEL_DERIVED,
+           "underrepresented_in_train": UNDERREP,
+           "phase6_nan_cause": "flag_rates() had no branch for this column; "
+                               "it fell through to else: np.nan"},
+          open(OUT / "phase6b_anx_coded_verdict.json", "w"), indent=2)
+print(f"\nwrote {OUT/'phase6b_anx_coded_verdict.json'}")
+P(anx_coded_this_adm | label) per split, NOTE level:
+label    0       1
+split             
+train  0.0  0.5348
+val    0.0  0.5301
+test   0.0  0.5285
+
+P(any note anx-coded | label) per split, PATIENT level:
+label    0       1
+split             
+train  0.0  0.8798
+val    0.0  0.8636
+test   0.0  0.8625
+
+max P(coded | control) across splits : 0.000000
+mean P(coded | case)    across splits : 0.531168
+
+==============================================================================
+VERDICT: anx_coded_this_adm IS A PROJECTION OF THE LABEL, NOT A TEXT CHARACTERISTIC
+==============================================================================
+  P(coded | control) is ~0 by construction: a control is a patient with NO
+  anxiety ICD code anywhere, so no admission of theirs can carry one.
+  The variable is therefore  (label == 1) AND (coded on this admission).
+  Its large Cliff's delta in Phase 6 (-0.5587, incorrect 0.0978 vs correct
+  0.6565) is largely a restatement of 'the model gets cases right more often
+  when the anxiety code is on the index admission' -- not the discovery of a
+  rare note type.
+
+  CONSEQUENCES:
+   1. It must be REMOVED from the candidate-strata set. Part E does that.
+   2. It must NOT be used to rebalance training data. Sampling on it would
+      be sampling on the label.
+   3. It remains legitimate as DESCRIPTIVE reporting metadata, which is
+      exactly what cohort.py's docstring says it is for.
+
+------------------------------------------------------------------------------
+QUESTION 4 — is it based on information available at index time?
+------------------------------------------------------------------------------
+  anx_coded_this_adm is attached by hadm_id. Under the at_or_before index policy
+  a note's admission is at or before the index discharge, so the code is not
+  post-index. But the LABEL is built from the patient's diagnoses across the
+  whole record, so the two are not independent regardless of timing.
+  Timing is not the problem here; shared derivation is.
+
+wrote /kaggle/working/phase6b/phase6b_anx_coded_verdict.json
+Part B — patient-level note contribution analysis
+The problem stated in the review:
+
+"if a patient is classified incorrectly, all of that patient's analysed notes become associated with the incorrect group. But that does not prove: this particular clinical note caused the error."
+
+with the worked example:
+
+patient
+  ├── note A → p = 0.05
+  ├── note B → p = 0.08
+  └── note C → p = 0.43
+                ↓
+          patient average = 0.187  →  FN
+"In that example, note C was actually strongly anxiety-like, but the other notes dragged the average down. If we simply label all three notes as 'FN notes,' we would be misleading ourselves."
+
+and the requested analysis:
+
+"For every incorrectly classified patient, calculate: note-level probability, note temporal weight, note contribution to pooled patient score. Then identify: FN patients — which notes pulled the patient score downward? FP patients — which notes pushed the patient score upward?"
+
+How contribution is defined here
+evaluation.run_plan pools by a plain mean over every (episode × query-note) row for a patient, so for a patient with rows (p_1 … p_n):
+
+patient score  P  = (1/n) Σ pᵢ
+contribution of i  = pᵢ / n                     (its share of the pooled score)
+pull of i          = (pᵢ − P) / n               (signed: how far it moves P from the mean)
+leave-one-out      = P₋ᵢ = (nP − pᵢ) / (n − 1)  (P if note i had never been sampled)
+A note is a decisive note if removing it flips the patient across the locked threshold 0.26931 — that is the concrete answer to "which clinical notes are actually causing the mistake?". A note is dissenting if its own score is on the correct side while the patient verdict is wrong.
+
+Note on the temporal weight: w^T weights support notes when a prototype is built, not query notes when they are pooled. A patient's query notes are pooled unweighted. The per-note temporal weight is still reported, because it is what w^T would assign, but it does not enter the pooling — stating that plainly avoids implying a mechanism that is not in the code.
+
+# ---------------------------------------------------------------------------
+# B0. Machinery — identical to Phase 6, so the numbers stay comparable.
+# ---------------------------------------------------------------------------
+import torch.nn.functional as Fn
+from tqdm.auto import tqdm
+from tcwpn.model import build_model
+from tcwpn.sampler import RecordStore, EpisodePlan, store_fingerprint
+from tcwpn.metrics import compute_metrics
+
+def load_run(run_dir, device=DEVICE):
+    manifest = json.loads((Path(run_dir) / "manifest.json").read_text())
+    model = build_model(manifest["config"]["model"]).to(device)
+    ckpt_path = Path(run_dir) / "best.pt"
+    try:
+        ckpt = torch.load(ckpt_path, map_location=device)
+    except Exception:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt)
+    model.eval()
+    return model, manifest
+
+def episode_slots(ep):
+    sup, qry = [], []
+    for c in sorted(ep["support"], key=int):
+        sup += [(int(i), int(c)) for i in ep["support"][c]]
+    for c in sorted(ep["query"], key=int):
+        qry += [(int(i), int(c)) for i in ep["query"][c]]
+    return sup, qry
+
+@torch.no_grad()
+def encode(bert, projection, store, indices, batch_size=32, desc="encode"):
+    '''Returns (row_of, pooled_768, projected_or_None). Mean-pools chunks like
+       ClinicalEmbedder. projection=None -> only the pooled representation.'''
+    indices = sorted(set(int(i) for i in indices))
+    row_of = {ix: r for r, ix in enumerate(indices)}
+    ids_rows, mask_rows, note_row = [], [], []
+    for ix in indices:
+        r = store.records[ix]
+        for cid, cmask in zip(r["input_ids"], r["attention_mask"]):
+            ids_rows.append(cid); mask_rows.append(cmask); note_row.append(row_of[ix])
+    H = bert.config.hidden_size
+    acc = torch.zeros(len(indices), H, device=DEVICE)
+    cnt = torch.zeros(len(indices), 1, device=DEVICE)
+    for s in tqdm(range(0, len(ids_rows), batch_size), desc=desc, leave=False):
+        ids  = torch.tensor(ids_rows[s:s+batch_size],  dtype=torch.long, device=DEVICE)
+        msk  = torch.tensor(mask_rows[s:s+batch_size], dtype=torch.long, device=DEVICE)
+        nix  = torch.tensor(note_row[s:s+batch_size],  dtype=torch.long, device=DEVICE)
+        cls = bert(input_ids=ids, attention_mask=msk).last_hidden_state[:, 0, :]
+        acc.index_add_(0, nix, cls.to(acc.dtype))
+        cnt.index_add_(0, nix, torch.ones(len(nix), 1, device=DEVICE))
+    pooled = acc / cnt.clamp(min=1.0)
+    proj = projection(pooled) if projection is not None else None
+    return row_of, pooled, proj
+
+@torch.no_grad()
+def score_plan_cached(model, store, plan, batch_size=32, desc="scoring"):
+    eps = list(plan)
+    needed = set()
+    for ep in eps:
+        s, q = episode_slots(ep)
+        needed |= {i for i, _ in s} | {i for i, _ in q}
+    row_of, pooled, proj = encode(model.embedder.bert, model.embedder.projection,
+                                  store, needed, batch_size, f"{desc}: encode")
+    days_all = [float(r.get("days_before_patient_last_note", 0.0)) for r in store.records]
+    rows = []
+    for ep_i, ep in enumerate(tqdm(eps, desc=f"{desc}: episodes", leave=False)):
+      with torch.no_grad():
+        sup, qry = episode_slots(ep)
+        classes = sorted({c for _, c in sup})
+        col_of = {c: i for i, c in enumerate(classes)}
+        protos = []
+        for c in classes:
+            idxs = [i for i, cc in sup if cc == c]
+            E = proj[[row_of[i] for i in idxs]]
+            d = torch.tensor([days_all[i] for i in idxs], dtype=torch.float32, device=DEVICE)
+            p, _ = model.build_prototype(E, d)
+            protos.append(p)
+        qidx = [i for i, _ in qry]
+        QE = proj[[row_of[i] for i in qidx]]
+        logits = model.classify(QE, protos)
+        pos = col_of.get(1, logits.size(1) - 1)
+        p_anx = Fn.softmax(logits, dim=-1)[:, pos].detach().float().cpu().numpy()
+        for j, (ridx, c_true) in enumerate(qry):
+            r = store.records[ridx]
+            rows.append({"episode": ep_i, "record_index": ridx,
+                         "note_id": str(r["note_id"]), "patient_id": str(r["subject_id"]),
+                         "label": int(c_true), "p_anxiety_note": float(p_anx[j]),
+                         "days": days_all[ridx]})
+    df = pd.DataFrame(rows)
+    return df, row_of, pooled.float().cpu().numpy(), proj.float().cpu().numpy()
+
+model, manifest = load_run(RUN_DIR)
+THRESHOLD = float(manifest["locked_threshold"])
+LAMBDA = None
+for h in reversed(manifest.get("history", [])):
+    if h.get("lambda_decay") is not None:
+        LAMBDA = float(h["lambda_decay"]); break
+print(f"{RUN_NAME} | threshold {THRESHOLD:.5f} (validation-locked) | lambda {LAMBDA}")
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+tcwpn_full_k5_seed42 | threshold 0.26931 (validation-locked) | lambda 0.4378160834312439
+# ---------------------------------------------------------------------------
+# B1. Score the frozen test plan and verify it reproduces Phase 6.
+# ---------------------------------------------------------------------------
+test_store = RecordStore.from_pkl(PKL_DIR / f"{STEM}_test.pkl", split_name="test")
+test_plan = EpisodePlan.load(PLAN_DIR / f"{STEM}_test_k{K}.json")
+fp = test_plan.meta.get("store_fingerprint")
+if fp and fp != store_fingerprint(test_store):
+    raise SystemExit("plan/pkl fingerprint mismatch — wrong Stage A dataset attached")
+
+geo, row_of_t, POOL_T, PROJ_T = score_plan_cached(model, test_store, test_plan, desc="test")
+
+def pool_to_patient(df):
+    g = df.groupby("patient_id")
+    return pd.DataFrame({"patient_id": g.size().index,
+                         "label": g["label"].first().values,
+                         "p_anxiety": g["p_anxiety_note"].mean().values,
+                         "n_rows": g.size().values}).sort_values("patient_id").reset_index(drop=True)
+
+patients = pool_to_patient(geo)
+from sklearn.metrics import roc_auc_score
+AUROC_TEST = float(roc_auc_score(patients["label"], patients["p_anxiety"]))
+print(f"\npatients {len(patients):,} | AUROC {AUROC_TEST:.4f} (Phase 6 reported 0.7379)")
+if abs(AUROC_TEST - 0.7379) > 1e-3:
+    raise SystemExit("this run does not reproduce the frozen Phase 6 result — STOP")
+
+if P6_ERR is not None:
+    p6 = pd.read_csv(P6_ERR); p6["patient_id"] = p6["patient_id"].astype(str)
+    mg = patients.merge(p6, on="patient_id")
+    print(f"agreement with Phase 6 error_analysis.csv: "
+          f"max |Δp| = {float((mg.p_anxiety - mg.predicted_probability).abs().max()):.3e}")
+
+patients["pred"] = (patients["p_anxiety"] >= THRESHOLD).astype(int)
+patients["error_type"] = np.where(
+    patients.label == 1,
+    np.where(patients.pred == 1, "TP", "FN"),
+    np.where(patients.pred == 0, "TN", "FP"))
+print()
+print(patients["error_type"].value_counts().reindex(["TP","TN","FP","FN"]).to_string())
+patients 2,278 | AUROC 0.7379 (Phase 6 reported 0.7379)
+agreement with Phase 6 error_analysis.csv: max |Δp| = 1.788e-07
+
+error_type
+TP    1247
+TN     264
+FP     661
+FN     106
+# ---------------------------------------------------------------------------
+# B2. Per-note contribution, pull, and leave-one-out flip.
+# ---------------------------------------------------------------------------
+note = (geo.groupby(["patient_id", "note_id", "record_index", "label"], as_index=False)
+        .agg(p_note=("p_anxiety_note", "mean"),
+             p_note_sd=("p_anxiety_note", "std"),
+             n_episodes=("episode", "nunique"),
+             days=("days", "first")))
+note = note.merge(patients[["patient_id", "p_anxiety", "n_rows", "pred", "error_type"]],
+                  on="patient_id", how="left")
+
+# rows-per-note, so the LOO removes the note's actual weight in the mean
+rows_per_note = geo.groupby(["patient_id", "note_id"]).size().rename("n_rows_note").reset_index()
+note = note.merge(rows_per_note, on=["patient_id", "note_id"], how="left")
+
+S = note["p_anxiety"] * note["n_rows"]                       # total of the patient's rows
+note["contribution"] = note["p_note"] * note["n_rows_note"] / note["n_rows"]
+note["pull"] = (note["p_note"] - note["p_anxiety"]) * note["n_rows_note"] / note["n_rows"]
+denom = note["n_rows"] - note["n_rows_note"]
+note["p_patient_without_note"] = np.where(
+    denom > 0, (S - note["p_note"] * note["n_rows_note"]) / denom.replace(0, np.nan), np.nan)
+note["pred_without_note"] = np.where(
+    note["p_patient_without_note"].notna(),
+    (note["p_patient_without_note"] >= THRESHOLD).astype(float), np.nan)
+# a patient with a single analysed note has nothing left to pool, so "decisive"
+# is undefined there rather than trivially true
+note["decisive"] = (note["pred_without_note"].notna() &
+                    (note["pred_without_note"] != note["pred"]))
+note["loo_defined"] = note["p_patient_without_note"].notna()
+note["note_pred"] = (note["p_note"] >= THRESHOLD).astype(int)
+note["note_correct"] = note["note_pred"] == note["label"]
+note["patient_correct"] = note["error_type"].isin(["TP", "TN"])
+note["dissenting"] = note["note_correct"] & ~note["patient_correct"]
+note["temporal_weight_wT"] = np.exp(-(LAMBDA or 0.0) * note["days"] / 365.0)
+
+print(f"notes {len(note):,} | patients {note.patient_id.nunique():,} | "
+      f"notes/patient mean {len(note)/note.patient_id.nunique():.2f}")
+print("\nnote-level agreement with the patient verdict:")
+print(f"   note verdict == patient verdict : {(note.note_correct == note.patient_correct).mean():.1%}")
+print(f"   DISSENTING notes (note right, patient wrong): {int(note.dissenting.sum()):,} "
+      f"({note.dissenting.mean():.1%} of all notes)")
+print("\nThis is the number that justifies the review's objection: attaching the")
+print("patient verdict to every note mislabels exactly these notes.")
+
+print("\nper-note statistics by patient verdict:")
+print(note.groupby("error_type")[["p_note", "pull", "contribution", "n_rows_note",
+                                  "temporal_weight_wT"]]
+      .mean().reindex(["TP","TN","FP","FN"]).round(4).to_string())
+note.to_csv(OUT / "phase6b_note_contributions.csv", index=False)
+print(f"\nwrote {OUT/'phase6b_note_contributions.csv'}")
+notes 2,907 | patients 2,278 | notes/patient mean 1.28
+
+note-level agreement with the patient verdict:
+   note verdict == patient verdict : 95.8%
+   DISSENTING notes (note right, patient wrong): 52 (1.8% of all notes)
+
+This is the number that justifies the review's objection: attaching the
+patient verdict to every note mislabels exactly these notes.
+
+per-note statistics by patient verdict:
+            p_note  pull  contribution  n_rows_note  temporal_weight_wT
+error_type                                                             
+TP          0.5992   0.0        0.4729       2.3064              0.7927
+TN          0.1885  -0.0        0.1685       4.0347              0.9449
+FP          0.4976  -0.0        0.3813       3.3914              0.8401
+FN          0.2046   0.0        0.1472       2.2553              0.7358
+
+wrote /kaggle/working/phase6b/phase6b_note_contributions.csv
+# ---------------------------------------------------------------------------
+# B3. Which notes actually move FP/FN patients across the decision?
+# ---------------------------------------------------------------------------
+err_notes = note[~note.patient_correct].copy()
+print("=" * 78)
+print("DECISIVE NOTES  (removing the note flips the patient across 0.26931)")
+print("=" * 78)
+for et in ("FN", "FP"):
+    sub = err_notes[err_notes.error_type == et]
+    if sub.empty:
+        print(f"\n{et}: no patients in this group"); continue
+    npat = sub.patient_id.nunique()
+    with_dec = sub.groupby("patient_id")["decisive"].max()
+    print(f"\n{et}: {npat:,} patients, {len(sub):,} notes")
+    print(f"   notes that are individually decisive : {int(sub.decisive.sum()):,} "
+          f"({sub.decisive.mean():.1%})")
+    print(f"   patients with >=1 decisive note      : {int(with_dec.sum()):,} "
+          f"({with_dec.mean():.1%})")
+    print(f"   patients with >=1 DISSENTING note    : "
+          f"{int(sub.groupby('patient_id')['dissenting'].max().sum()):,} "
+          f"({sub.groupby('patient_id')['dissenting'].max().mean():.1%})")
+    if et == "FN":
+        w = sub.nsmallest(5, "pull")
+        print("\n   notes that pulled FN patients DOWNWARD hardest:")
+    else:
+        w = sub.nlargest(5, "pull")
+        print("\n   notes that pushed FP patients UPWARD hardest:")
+    print(w[["patient_id", "note_id", "p_note", "p_anxiety",
+             "p_patient_without_note", "pull", "decisive", "days"]]
+          .round(4).to_string(index=False))
+
+print("\n" + "=" * 78)
+print("WITHIN-PATIENT SPREAD OF NOTE SCORES  (the review's note A/B/C example)")
+print("=" * 78)
+spread = (note.groupby(["patient_id", "error_type"])
+          .agg(n_notes=("note_id", "nunique"), p_min=("p_note", "min"),
+               p_max=("p_note", "max"), p_patient=("p_anxiety", "first")).reset_index())
+spread["range"] = spread["p_max"] - spread["p_min"]
+spread["straddles_threshold"] = (spread.p_min < THRESHOLD) & (spread.p_max >= THRESHOLD)
+print(spread.groupby("error_type")[["n_notes", "range", "straddles_threshold"]]
+      .mean().reindex(["TP","TN","FP","FN"]).round(4).to_string())
+print("\nstraddles_threshold = the patient has notes on BOTH sides of 0.26931.")
+print("For those patients the pooled verdict is a summary, not a property of any note.")
+mult = spread[spread.n_notes > 1]
+print(f"\npatients with >1 analysed note: {len(mult):,}/{len(spread):,} "
+      f"({len(mult)/max(len(spread),1):.1%})")
+print("If most patients contribute a single note, contribution analysis is bounded")
+print("by design and the pooling objection is smaller than it looks -- report which.")
+spread.to_csv(OUT / "phase6b_patient_note_spread.csv", index=False)
+==============================================================================
+DECISIVE NOTES  (removing the note flips the patient across 0.26931)
+==============================================================================
+
+FN: 106 patients, 141 notes
+   notes that are individually decisive : 21 (14.9%)
+   patients with >=1 decisive note      : 21 (19.8%)
+   patients with >=1 DISSENTING note    : 21 (19.8%)
+
+   notes that pulled FN patients DOWNWARD hardest:
+patient_id        note_id  p_note  p_anxiety  p_patient_without_note    pull  decisive    days
+  10773585  10773585-DS-4  0.0843     0.2309                  0.5241 -0.0977      True 19.4722
+  15446558 15446558-DS-17  0.0280     0.1684                  0.4493 -0.0936      True 11.4375
+  13081604  13081604-DS-7  0.0970     0.2307                  0.4981 -0.0891      True 73.6215
+  13342249 13342249-DS-13  0.0666     0.1679                  0.3706 -0.0676      True  0.8125
+  16333287 16333287-DS-15  0.1372     0.2377                  0.4386 -0.0670      True  6.6458
+
+FP: 661 patients, 856 notes
+   notes that are individually decisive : 22 (2.6%)
+   patients with >=1 decisive note      : 22 (3.3%)
+   patients with >=1 DISSENTING note    : 28 (4.2%)
+
+   notes that pushed FP patients UPWARD hardest:
+patient_id        note_id  p_note  p_anxiety  p_patient_without_note   pull  decisive     days
+  15287424 15287424-DS-20  0.8598     0.5846                  0.1719 0.1651      True   0.6354
+  19862541 19862541-DS-18  0.6536     0.3934                  0.1332 0.1301      True   0.7292
+  14877088  14877088-DS-9  0.7449     0.4853                  0.2258 0.1298      True   0.5729
+  18342284 18342284-DS-10  0.8269     0.5134                  0.3567 0.1045     False  11.6708
+  11957815  11957815-DS-8  0.8477     0.3266                  0.1963 0.1042      True 160.7014
+
+==============================================================================
+WITHIN-PATIENT SPREAD OF NOTE SCORES  (the review's note A/B/C example)
+==============================================================================
+            n_notes   range  straddles_threshold
+error_type                                      
+TP           1.3007  0.0571               0.0457
+TN           1.0909  0.0149               0.0379
+FP           1.2950  0.0436               0.0424
+FN           1.3302  0.0513               0.1981
+
+straddles_threshold = the patient has notes on BOTH sides of 0.26931.
+For those patients the pooled verdict is a summary, not a property of any note.
+
+patients with >1 analysed note: 504/2,278 (22.1%)
+If most patients contribute a single note, contribution analysis is bounded
+by design and the pooling objection is smaller than it looks -- report which.
+Part C — isolating the representation staircase
+The review's objection to EMBEDDING_AND_MODEL:
+
+"the 0.7172 centroid AUROC is obtained from the already-trained 256-dimensional projection. It does not isolate ClinicalBERT itself from pooling + projection layer + training objective. So you cannot yet conclude 'ClinicalBERT is bad.'"
+
+and the requested experiment:
+
+"Use the frozen 768-dimensional ClinicalBERT representation. Evaluate: 5-fold patient-level centroid classifier, kNN, logistic regression with proper cross-validation — without training TC-WPN. Then compare ClinicalBERT 768 → Projection 256 → TC-WPN. This tells us where the information is being lost/gained."
+
+What Phase 6 measured versus what this measures
+Phase 6's 0.7204 was the fine-tuned encoder inside best.pt — it had already been shaped by episodic training and the auxiliary head. It is not "frozen ClinicalBERT". So the staircase needs four rungs, not two:
+
+rung	representation	isolates
+S0	pretrained Bio_ClinicalBERT, never fine-tuned	what the off-the-shelf encoder knows
+S1	fine-tuned encoder, pooled [CLS] 768-d	what episodic + auxiliary training added
+S2	fine-tuned projection 256-d	what the projection head keeps or destroys
+S3	full TC-WPN episodic inference	what prototypes and weighting add
+S0 → S1 is the training objective's contribution. S1 → S2 is the projection's. S2 → S3 is the prototype stage's. Only with S0 present can the sentence "ClinicalBERT is the limitation" be either supported or refused.
+
+Two methodological corrections
+Probes are fit on train and evaluated on test. Phase 6's cross-validated centroid was fit and scored inside the test split. That is fine as a descriptive geometry measure, but it is not comparable to a model trained on the training set. Here every probe is fit on train patients, its one hyper-parameter is selected on val, and it is scored once on test.
+
+Everything is patient level. Phase 6 compared a note-level 0.7172 to a patient-level 0.7379 and flagged the mismatch itself. Note embeddings are mean-pooled to the patient before any probe runs, so all four rungs and the 0.7379 sit on the same unit and the same 2 278 patients.
+
+# ---------------------------------------------------------------------------
+# C1. Embed train/val/test notes with the PRETRAINED encoder (S0) and the
+#     FINE-TUNED encoder (S1/S2). Two encoder passes; GPU.
+# ---------------------------------------------------------------------------
+from transformers import AutoModel
+ENCODER = manifest["config"]["model"].get("encoder_name", "emilyalsentzer/Bio_ClinicalBERT")
+MAX_NOTES_PER_SPLIT = None      # set an int to subsample if the session is short
+
+stores, keep = {}, {}
+for sp in ("train", "val", "test"):
+    st = RecordStore.from_pkl(PKL_DIR / f"{STEM}_{sp}.pkl", split_name=sp)
+    stores[sp] = st
+    idx = list(range(len(st.records)))
+    if MAX_NOTES_PER_SPLIT and len(idx) > MAX_NOTES_PER_SPLIT:
+        idx = list(np.random.default_rng(42).choice(idx, MAX_NOTES_PER_SPLIT, replace=False))
+    keep[sp] = idx
+    print(f"{sp:5s}: {len(st.records):,} notes, embedding {len(idx):,}")
+
+print("\nloading pretrained encoder (S0) — NOT fine-tuned ...")
+bert0 = AutoModel.from_pretrained(ENCODER).to(DEVICE).eval()
+
+EMB = {}
+for sp in ("train", "val", "test"):
+    r0, pooled0, _ = encode(bert0, None, stores[sp], keep[sp], desc=f"S0 {sp}")
+    r1, pooled1, proj1 = encode(model.embedder.bert, model.embedder.projection,
+                                stores[sp], keep[sp], desc=f"S1/S2 {sp}")
+    assert r0 == r1
+    meta = pd.DataFrame({
+        "record_index": sorted(r1, key=lambda k: r1[k]),
+        "patient_id": [str(stores[sp].records[i]["subject_id"]) for i in sorted(r1, key=lambda k: r1[k])],
+        "label": [int(stores[sp].records[i]["label"]) for i in sorted(r1, key=lambda k: r1[k])]})
+    EMB[sp] = {"meta": meta,
+               "S0": pooled0.float().cpu().numpy(),
+               "S1": pooled1.float().cpu().numpy(),
+               "S2": proj1.float().cpu().numpy()}
+    print(f"  {sp}: S0 {EMB[sp]['S0'].shape}  S1 {EMB[sp]['S1'].shape}  S2 {EMB[sp]['S2'].shape}")
+
+del bert0
+if DEVICE == "cuda":
+    torch.cuda.empty_cache()
+train: 15,566 notes, embedding 15,566
+val  : 3,383 notes, embedding 3,383
+test : 3,450 notes, embedding 3,450
+
+loading pretrained encoder (S0) — NOT fine-tuned ...
+  train: S0 (15566, 768)  S1 (15566, 768)  S2 (15566, 256)
+  val: S0 (3383, 768)  S1 (3383, 768)  S2 (3383, 256)
+  test: S0 (3450, 768)  S1 (3450, 768)  S2 (3450, 256)
+# ---------------------------------------------------------------------------
+# C2. Patient-level probes: fit on TRAIN, select on VAL, score ONCE on TEST.
+# ---------------------------------------------------------------------------
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
+
+def to_patient(emb, meta):
+    df = meta.copy()
+    df["_row"] = np.arange(len(df))
+    g = df.groupby("patient_id")
+    X = np.vstack([emb[idx["_row"].values].mean(0) for _, idx in g])
+    y = g["label"].first().values.astype(int)
+    pid = np.array(list(g.groups.keys()))
+    return X, y, pid
+
+def l2(X):
+    return X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-12)
+
+def centroid_score(Xtr, ytr, Xte):
+    c1 = l2(l2(Xtr)[ytr == 1].mean(0, keepdims=True))
+    c0 = l2(l2(Xtr)[ytr == 0].mean(0, keepdims=True))
+    Z = l2(Xte)
+    return (Z @ c1.T - Z @ c0.T).ravel()
+
+rows = []
+for stage, name in (("S0", "S0 pretrained Bio_ClinicalBERT 768"),
+                    ("S1", "S1 fine-tuned encoder pooled 768"),
+                    ("S2", "S2 fine-tuned projection 256")):
+    Xtr, ytr, _ = to_patient(EMB["train"][stage], EMB["train"]["meta"])
+    Xva, yva, _ = to_patient(EMB["val"][stage],   EMB["val"]["meta"])
+    Xte, yte, _ = to_patient(EMB["test"][stage],  EMB["test"]["meta"])
+
+    a_cen = roc_auc_score(yte, centroid_score(Xtr, ytr, Xte))
+
+    best_k, best_v = None, -1
+    for kk in (5, 10, 25, 50):
+        kn = KNeighborsClassifier(n_neighbors=kk, metric="cosine").fit(l2(Xtr), ytr)
+        v = roc_auc_score(yva, kn.predict_proba(l2(Xva))[:, 1])
+        if v > best_v:
+            best_k, best_v = kk, v
+    kn = KNeighborsClassifier(n_neighbors=best_k, metric="cosine").fit(l2(Xtr), ytr)
+    a_knn = roc_auc_score(yte, kn.predict_proba(l2(Xte))[:, 1])
+
+    sc = StandardScaler().fit(Xtr)
+    best_C, best_v = None, -1
+    for Cc in (0.001, 0.01, 0.1, 1.0):
+        lr = LogisticRegression(C=Cc, max_iter=3000).fit(sc.transform(Xtr), ytr)
+        v = roc_auc_score(yva, lr.predict_proba(sc.transform(Xva))[:, 1])
+        if v > best_v:
+            best_C, best_v = Cc, v
+    lr = LogisticRegression(C=best_C, max_iter=3000).fit(sc.transform(Xtr), ytr)
+    a_lr = roc_auc_score(yte, lr.predict_proba(sc.transform(Xte))[:, 1])
+
+    rows.append({"stage": name, "centroid": a_cen, "knn": a_knn, "logreg": a_lr,
+                 "knn_k_val": best_k, "logreg_C_val": best_C,
+                 "n_train_patients": len(ytr), "n_test_patients": len(yte)})
+    print(f"{name:<38} centroid {a_cen:.4f} | kNN {a_knn:.4f} (k={best_k}) | "
+          f"logreg {a_lr:.4f} (C={best_C})")
+
+rows.append({"stage": "S3 full TC-WPN episodic", "centroid": np.nan, "knn": np.nan,
+             "logreg": AUROC_TEST, "knn_k_val": None, "logreg_C_val": None,
+             "n_train_patients": np.nan, "n_test_patients": len(patients)})
+stair = pd.DataFrame(rows)
+stair.to_csv(OUT / "phase6b_representation_staircase.csv", index=False)
+print("\n" + "=" * 78)
+print("REPRESENTATION STAIRCASE — all patient level, all on the same test patients")
+print("=" * 78)
+print(stair.round(4).to_string(index=False))
+S0 pretrained Bio_ClinicalBERT 768     centroid 0.5474 | kNN 0.5992 (k=50) | logreg 0.6307 (C=0.001)
+S1 fine-tuned encoder pooled 768       centroid 0.7615 | kNN 0.7688 (k=50) | logreg 0.7599 (C=0.001)
+S2 fine-tuned projection 256           centroid 0.7589 | kNN 0.7600 (k=50) | logreg 0.7611 (C=0.01)
+
+==============================================================================
+REPRESENTATION STAIRCASE — all patient level, all on the same test patients
+==============================================================================
+                             stage  centroid    knn  logreg  knn_k_val  logreg_C_val  n_train_patients  n_test_patients
+S0 pretrained Bio_ClinicalBERT 768    0.5474 0.5992  0.6307       50.0         0.001           10290.0             2278
+  S1 fine-tuned encoder pooled 768    0.7615 0.7688  0.7599       50.0         0.001           10290.0             2278
+      S2 fine-tuned projection 256    0.7589 0.7600  0.7611       50.0         0.010           10290.0             2278
+           S3 full TC-WPN episodic       NaN    NaN  0.7379        NaN           NaN               NaN             2278
+# ---------------------------------------------------------------------------
+# C3. Read the staircase: where is information gained or lost?
+# ---------------------------------------------------------------------------
+def best_of(stage_prefix):
+    r = stair[stair.stage.str.startswith(stage_prefix)].iloc[0]
+    return float(np.nanmax([r["centroid"], r["knn"], r["logreg"]]))
+
+s0, s1, s2, s3 = best_of("S0"), best_of("S1"), best_of("S2"), AUROC_TEST
+print(f"S0 pretrained ClinicalBERT   : {s0:.4f}   (best probe)")
+print(f"S1 fine-tuned encoder 768    : {s1:.4f}   delta from S0 {s1-s0:+.4f}")
+print(f"S2 projection 256            : {s2:.4f}   delta from S1 {s2-s1:+.4f}")
+print(f"S3 full TC-WPN               : {s3:.4f}   delta from S2 {s3-s2:+.4f}")
+
+print("\nINTERPRETATION RULES (fixed before reading):")
+print("  S1 - S0 <= 0.01  -> episodic + auxiliary training added little to the encoder")
+print("  S2 - S1 <  -0.01 -> the 256-d projection is DESTROYING usable signal")
+print("  S3 - S2 <= 0.01  -> the prototype stage adds little beyond the representation")
+print("  S0 already near S3 -> the ceiling is the PRETRAINED representation, and no")
+print("     amount of head/prototype engineering will move it")
+
+flags = []
+if s1 - s0 <= 0.01: flags.append("TRAINING_ADDS_LITTLE")
+if s2 - s1 < -0.01: flags.append("PROJECTION_LOSES_SIGNAL")
+if s3 - s2 <= 0.01: flags.append("PROTOTYPE_STAGE_ADDS_LITTLE")
+if abs(s3 - s0) <= 0.02: flags.append("CEILING_IS_PRETRAINED_REPRESENTATION")
+print(f"\nflags fired: {flags if flags else 'none'}")
+
+print("\nWhat can and cannot be said now:")
+print("  CAN: name the stage where discrimination stops improving, with a")
+print("       train-fit / test-scored number on the same patients as 0.7379.")
+print("  CANNOT: say 'ClinicalBERT is bad' unless S0 is BOTH low AND close to S3.")
+print("       If S0 is already ~S3, the encoder is not bad -- it is saturated for")
+print("       this cohort and label definition, which is a different claim.")
+json.dump({"S0_pretrained_768": s0, "S1_finetuned_768": s1,
+           "S2_projection_256": s2, "S3_tcwpn": s3, "flags": flags},
+          open(OUT / "phase6b_staircase_verdict.json", "w"), indent=2)
+S0 pretrained ClinicalBERT   : 0.6307   (best probe)
+S1 fine-tuned encoder 768    : 0.7688   delta from S0 +0.1381
+S2 projection 256            : 0.7611   delta from S1 -0.0077
+S3 full TC-WPN               : 0.7379   delta from S2 -0.0232
+
+INTERPRETATION RULES (fixed before reading):
+  S1 - S0 <= 0.01  -> episodic + auxiliary training added little to the encoder
+  S2 - S1 <  -0.01 -> the 256-d projection is DESTROYING usable signal
+  S3 - S2 <= 0.01  -> the prototype stage adds little beyond the representation
+  S0 already near S3 -> the ceiling is the PRETRAINED representation, and no
+     amount of head/prototype engineering will move it
+
+flags fired: ['PROTOTYPE_STAGE_ADDS_LITTLE']
+
+What can and cannot be said now:
+  CAN: name the stage where discrimination stops improving, with a
+       train-fit / test-scored number on the same patients as 0.7379.
+  CANNOT: say 'ClinicalBERT is bad' unless S0 is BOTH low AND close to S3.
+       If S0 is already ~S3, the encoder is not bad -- it is saturated for
+       this cohort and label definition, which is a different claim.
+Part D — verify the truncation effect
+The review's position, which is a warning as much as a suggestion:
+
+"your results show almost every note reaches the 512-token ceiling: incorrect median = 512, correct median = 512, with truncated_by_512 = 1.0 for both groups. So: this is definitely a pipeline limitation. But: Phase 6 did NOT prove that it is the main cause of the poor performance. … Interestingly, the errors are less likely to have anxiety terminology exclusively beyond the first window. Therefore don't claim: '512-token truncation is the reason for the 0.7379 AUROC.' It isn't demonstrated."
+
+truncated_by_512 = 1.0 for both groups makes the flag useless as a discriminator — a constant cannot separate anything. So this part measures the thing that does vary: how much of each note is unseen, and whether that quantity relates to error.
+
+Three measurements:
+
+Unseen fraction. Characters and estimated wordpieces beyond the window, per note, by verdict. If errors and correct notes lose the same proportion, truncation is a uniform handicap, not an error driver.
+Where the anxiety evidence sits. Phase 6 found anxiety_in_full_but_not_in_window at 24.5% for incorrect versus 35.9% for correct — the wrong direction for the truncation story. That is re-derived here and stated in the direction the data actually points.
+A bound on the achievable gain. Notes where the first window contains no anxiety terminology but the full note does are the only ones a larger max_chunks could newly inform. Counting them, and how many of those patients are currently errors, gives an upper bound on what Experiment C could recover — before spending five seeds on it.
+That bound is the point. It converts "worth trying" into a number.
+
+# ---------------------------------------------------------------------------
+# D1. How much of each note is actually unseen?
+# ---------------------------------------------------------------------------
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained(ENCODER)
+
+queried = sorted(set(note["record_index"].astype(int)))
+dec = {}
+for ix in tqdm(queried, desc="decoding the window", leave=False):
+    r = test_store.records[ix]
+    ids = [t for c in r["input_ids"] for t in c]
+    dec[ix] = (tok.decode(ids, skip_special_tokens=True),
+               int(sum(sum(c) for c in r["attention_mask"])))
+
+cohort_test = cohort[cohort["split"] == "test"].copy()
+tv = pd.DataFrame({"record_index": queried,
+                   "note_id": [str(test_store.records[i]["note_id"]) for i in queried],
+                   "text_seen": [dec[i][0] for i in queried],
+                   "n_tok_seen": [dec[i][1] for i in queried]})
+tv = tv.merge(cohort_test[["note_id", "text"]], on="note_id", how="left")
+tv["text"] = tv["text"].fillna("")
+tv["chars_full"] = tv["text"].str.len()
+tv["chars_seen"] = tv["text_seen"].str.len()
+tv["frac_seen"] = (tv["chars_seen"] / tv["chars_full"].clip(lower=1)).clip(upper=1.0)
+tv["chars_unseen"] = (tv["chars_full"] - tv["chars_seen"]).clip(lower=0)
+
+tv = tv.merge(note[["record_index", "error_type", "patient_correct", "label"]]
+              .drop_duplicates("record_index"), on="record_index", how="left")
+
+print(f"notes analysed: {len(tv):,}")
+print(f"tokens seen    : median {tv.n_tok_seen.median():.0f}, "
+      f"at the 512 ceiling {float((tv.n_tok_seen >= 511).mean()):.1%}")
+print("\nunseen content by verdict:")
+print(tv.groupby("error_type")[["chars_full", "chars_seen", "chars_unseen", "frac_seen"]]
+      .median().reindex(["TP","TN","FP","FN"]).round(3).to_string())
+
+from scipy import stats
+def cliffs(a, b):
+    a = np.asarray(a, float); a = a[~np.isnan(a)]
+    b = np.asarray(b, float); b = b[~np.isnan(b)]
+    if len(a) < 2 or len(b) < 2: return np.nan, np.nan
+    u, p = stats.mannwhitneyu(a, b, alternative="two-sided")
+    return float(2*u/(len(a)*len(b)) - 1), float(p)
+
+print("\nincorrect vs correct:")
+for c in ("frac_seen", "chars_unseen", "chars_full"):
+    d, p = cliffs(tv.loc[~tv.patient_correct, c], tv.loc[tv.patient_correct, c])
+    print(f"   {c:<14} cliffs delta {d:+.4f}   p {p:.3g}")
+print("\n|delta| < 0.11 is negligible: truncation would then be a UNIFORM handicap")
+print("across correct and incorrect notes, not a driver of the errors.")
+notes analysed: 2,907
+tokens seen    : median 512, at the 512 ceiling 99.9%
+
+unseen content by verdict:
+            chars_full  chars_seen  chars_unseen  frac_seen
+error_type                                                 
+TP              9132.5      1920.0        7201.0      0.212
+TN              7622.5      1881.5        5796.0      0.246
+FP              8787.5      1914.0        6901.0      0.216
+FN              8218.0      1867.0        6311.0      0.227
+
+incorrect vs correct:
+   frac_seen      cliffs delta +0.0103   p 0.647
+   chars_unseen   cliffs delta -0.0152   p 0.5
+   chars_full     cliffs delta -0.0159   p 0.481
+
+|delta| < 0.11 is negligible: truncation would then be a UNIFORM handicap
+across correct and incorrect notes, not a driver of the errors.
+# ---------------------------------------------------------------------------
+# D2. Upper bound on what max_chunks 1 -> 4 could recover.
+# ---------------------------------------------------------------------------
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "tokc", "/kaggle/working/tcwpn_test/scripts/tokenize_cohort.py")
+tokc = importlib.util.module_from_spec(spec); spec.loader.exec_module(tokc)
+
+def pat(terms):
+    o = sorted(set(terms), key=len, reverse=True)
+    return re.compile(r"\b(?:" + "|".join(re.escape(t) for t in o) + r")\b", flags=re.I)
+
+P_ANX = pat(tokc.ANXIETY_TERMS)
+tv["anx_in_window"] = tv["text_seen"].str.contains(P_ANX)
+tv["anx_in_full"] = tv["text"].str.contains(P_ANX)
+tv["anx_beyond_window_only"] = tv["anx_in_full"] & ~tv["anx_in_window"]
+
+print("anxiety terminology location, by verdict:")
+print(tv.groupby("error_type")[["anx_in_window", "anx_in_full", "anx_beyond_window_only"]]
+      .mean().reindex(["TP","TN","FP","FN"]).round(4).to_string())
+d, p = cliffs(tv.loc[~tv.patient_correct, "anx_beyond_window_only"].astype(float),
+              tv.loc[tv.patient_correct, "anx_beyond_window_only"].astype(float))
+print(f"\nanx_beyond_window_only, incorrect {tv.loc[~tv.patient_correct,'anx_beyond_window_only'].mean():.4f} "
+      f"vs correct {tv.loc[tv.patient_correct,'anx_beyond_window_only'].mean():.4f}  "
+      f"(delta {d:+.4f}, p {p:.3g})")
+if tv.loc[~tv.patient_correct, "anx_beyond_window_only"].mean() < \
+   tv.loc[tv.patient_correct, "anx_beyond_window_only"].mean():
+    print("  -> errors are LESS likely to hide anxiety terms past the window,")
+    print("     which is the OPPOSITE of what the truncation story predicts.")
+
+print("\n" + "=" * 78)
+print("UPPER BOUND ON EXPERIMENT C  (max_chunks 1 -> 4)")
+print("=" * 78)
+cand = tv[tv.anx_beyond_window_only].merge(
+    note[["record_index", "patient_id"]].drop_duplicates("record_index"),
+    on="record_index", how="left")
+npat_total = patients.patient_id.nunique()
+npat_gain = cand.patient_id.nunique()
+err_pat = set(patients.loc[patients.error_type.isin(["FP", "FN"]), "patient_id"])
+npat_gain_err = len(set(cand.patient_id) & err_pat)
+print(f"  notes with anxiety terms ONLY beyond the window : {int(tv.anx_beyond_window_only.sum()):,}"
+      f" / {len(tv):,} ({tv.anx_beyond_window_only.mean():.1%})")
+print(f"  patients touched by such a note                 : {npat_gain:,} / {npat_total:,} "
+      f"({npat_gain/max(npat_total,1):.1%})")
+print(f"  of those, currently MISCLASSIFIED               : {npat_gain_err:,} "
+      f"({npat_gain_err/max(len(err_pat),1):.1%} of all errors)")
+print("\n  Even if a longer window fixed EVERY one of those misclassified patients --")
+print("  which no mechanism guarantees -- that is the ceiling on the intervention.")
+print("  Lexical anxiety terms are only a proxy for the evidence a longer window")
+print("  would add, so treat this as an ORDER OF MAGNITUDE, not a prediction.")
+tv.drop(columns=["text", "text_seen"]).to_csv(OUT / "phase6b_truncation.csv", index=False)
+json.dump({"frac_notes_anx_beyond_window_only": float(tv.anx_beyond_window_only.mean()),
+           "patients_touched": int(npat_gain), "patients_touched_and_wrong": int(npat_gain_err),
+           "n_errors": int(len(err_pat))},
+          open(OUT / "phase6b_truncation_bound.json", "w"), indent=2)
+anxiety terminology location, by verdict:
+            anx_in_window  anx_in_full  anx_beyond_window_only
+error_type                                                    
+TP                 0.3687       0.7096                  0.3409
+TN                 0.0417       0.2222                  0.1806
+FP                 0.1390       0.3026                  0.1636
+FN                 0.0922       0.5106                  0.4184
+
+anx_beyond_window_only, incorrect 0.1996 vs correct 0.3168  (delta -0.1172, p 2.05e-11)
+  -> errors are LESS likely to hide anxiety terms past the window,
+     which is the OPPOSITE of what the truncation story predicts.
+
+==============================================================================
+UPPER BOUND ON EXPERIMENT C  (max_chunks 1 -> 4)
+==============================================================================
+  notes with anxiety terms ONLY beyond the window : 804 / 2,907 (27.7%)
+  patients touched by such a note                 : 730 / 2,278 (32.0%)
+  of those, currently MISCLASSIFIED               : 188 (24.5% of all errors)
+
+  Even if a longer window fixed EVERY one of those misclassified patients --
+  which no mechanism guarantees -- that is the ceiling on the intervention.
+  Lexical anxiety terms are only a proxy for the evidence a longer window
+  would add, so treat this as an ORDER OF MAGNITUDE, not a prediction.
+Part E — corrected root-cause verdict
+Three corrections to the Phase 6 verdict, each traceable to a specific objection.
+
+E1 — the MODEL branch rule used OR.
+
+MODEL fires if  |AUROC(weighted) - AUROC(uniform)| >= 0.010   OR   error flip rate >= 5%
+observed        0.0009                                             6.24%
+"A model can change 5% of decisions while improving AUROC by almost nothing. And that's essentially what happened. … MODEL = true is mechanically correct according to your pre-registered rule. But MODEL = root cause is not strongly supported by the actual effect size."
+
+Changing a pre-registered rule after seeing the data is normally illegitimate, so this is recorded explicitly as an amendment with its reason, and both verdicts are reported — the original rule and the amended one. The amendment is defensible because the flip-rate clause was a mechanism-activity test standing in for a discrimination test, and Part B of Phase 6 already had a dedicated activity measure. Effect size becomes necessary, not sufficient-on-its-own.
+
+E2 — anx_coded_this_adm should not have been a candidate stratum. Part A establishes whether it is a label projection. If it is, it is removed and the DATA branch is re-evaluated without it.
+
+E3 — the conclusion wording. The review's replacement, which the numbers do support:
+
+"The dominant limitation appears to be the quality/separability of the learned clinical representation, while the TC-WPN weighting mechanism is active but contributes very little to aggregate discrimination. The data-error analysis does not identify a strongly clustered error stratum."
+
+Part C is what upgrades "learned clinical representation" from an assertion to a located stage.
+
+# ---------------------------------------------------------------------------
+# E1. Re-derive the verdict with the corrections applied.
+# ---------------------------------------------------------------------------
+DELTA_WEIGHTING = 0.0009      # Phase 6 counterfactual, same model/embeddings/episodes
+FLIP_ERR        = 0.0624
+ERROR_CLUSTERING = 1.1637     # k-NN enrichment, floor was 1.5
+CENTROID_P6     = 0.7172      # note-level, test-internal (Phase 6)
+
+CANDIDATES_P6 = ["anx_coded_this_adm"]
+CANDIDATES = [c for c in CANDIDATES_P6 if not (c == "anx_coded_this_adm" and LABEL_DERIVED)]
+print(f"Phase 6 candidate strata : {CANDIDATES_P6}")
+print(f"after Part A screening   : {CANDIDATES if CANDIDATES else 'NONE'}")
+if not CANDIDATES:
+    print("   anx_coded_this_adm removed: it is a projection of the ICD-derived label,")
+    print("   not a clinical-text characteristic. Sampling on it would sample on y.")
+
+DATA_ORIG  = bool(CANDIDATES_P6) and False and (ERROR_CLUSTERING >= 1.5)
+DATA_NEW   = bool(CANDIDATES) and UNDERREP and (ERROR_CLUSTERING >= 1.5)
+EMB_ORIG   = (abs(AUROC_TEST - CENTROID_P6) <= 0.03) and (AUROC_TEST < 0.80)
+EMB_NEW    = (abs(AUROC_TEST - max(s0, s1, s2)) <= 0.03) and (AUROC_TEST < 0.80)
+MODEL_ORIG = (abs(DELTA_WEIGHTING) >= 0.010) or (FLIP_ERR >= 0.05)
+MODEL_NEW  = (abs(DELTA_WEIGHTING) >= 0.010) and (FLIP_ERR >= 0.05)
+
+orig = [n for n, v in (("DATA", DATA_ORIG), ("EMBEDDING", EMB_ORIG), ("MODEL", MODEL_ORIG)) if v]
+new  = [n for n, v in (("DATA", DATA_NEW),  ("EMBEDDING", EMB_NEW),  ("MODEL", MODEL_NEW))  if v]
+
+print("\n" + "=" * 78)
+print("BRANCH EVALUATION — original rules vs amended rules")
+print("=" * 78)
+print(f"{'branch':<12}{'original':<12}{'amended':<12}  reason for the change")
+print(f"{'DATA':<12}{str(DATA_ORIG):<12}{str(DATA_NEW):<12}  "
+      f"candidate screened for label derivation; coverage now computed, not NaN")
+print(f"{'EMBEDDING':<12}{str(EMB_ORIG):<12}{str(EMB_NEW):<12}  "
+      f"probe fit on train, scored on test, patient level")
+print(f"{'MODEL':<12}{str(MODEL_ORIG):<12}{str(MODEL_NEW):<12}  "
+      f"OR -> AND: flip rate alone is activity, not discrimination")
+print(f"\noriginal verdict : {'_AND_'.join(orig) if orig else 'NO_SINGLE_ROOT_CAUSE'}"
+      f"   (Phase 6 reported EMBEDDING_AND_MODEL)")
+print(f"amended verdict  : {'_AND_'.join(new) if new else 'NO_SINGLE_ROOT_CAUSE'}")
+
+verdict = {
+    "run": RUN_NAME,
+    "amendments": [
+        "MODEL branch: OR -> AND. A 6.24% flip rate with delta AUROC +0.0009 is "
+        "mechanism activity, not a discrimination effect.",
+        "DATA branch: anx_coded_this_adm screened for label derivation before being "
+        "treated as a stratum; train/val coverage computed properly (Phase 6's NaN was "
+        "a missing branch in flag_rates, not missing data).",
+        "EMBEDDING branch: probe now fit on train and scored on test at patient level, "
+        "and split across S0/S1/S2 so the limiting stage is identified.",
+    ],
+    "evidence": {
+        "model_auroc_test": round(AUROC_TEST, 4),
+        "S0_pretrained_768": round(s0, 4), "S1_finetuned_768": round(s1, 4),
+        "S2_projection_256": round(s2, 4), "S3_tcwpn": round(s3, 4),
+        "staircase_flags": flags,
+        "auroc_weighted_minus_uniform": DELTA_WEIGHTING,
+        "decision_flip_rate_errors": FLIP_ERR,
+        "knn_error_clustering_enrichment": ERROR_CLUSTERING,
+        "anx_coded_label_derived": LABEL_DERIVED,
+        "anx_coded_underrepresented_in_train": UNDERREP,
+        "dissenting_note_rate": round(float(note.dissenting.mean()), 4),
+        "truncation_upper_bound_patients_wrong": int(npat_gain_err),
+    },
+    "branches_original": {"DATA": DATA_ORIG, "EMBEDDING": EMB_ORIG, "MODEL": MODEL_ORIG},
+    "branches_amended": {"DATA": DATA_NEW, "EMBEDDING": EMB_NEW, "MODEL": MODEL_NEW},
+    "verdict_original": "_AND_".join(orig) if orig else "NO_SINGLE_ROOT_CAUSE",
+    "verdict_amended": "_AND_".join(new) if new else "NO_SINGLE_ROOT_CAUSE",
+}
+json.dump(verdict, open(OUT / "phase6b_root_cause_verdict.json", "w"), indent=2)
+print(f"\nwrote {OUT/'phase6b_root_cause_verdict.json'}")
+Phase 6 candidate strata : ['anx_coded_this_adm']
+after Part A screening   : NONE
+   anx_coded_this_adm removed: it is a projection of the ICD-derived label,
+   not a clinical-text characteristic. Sampling on it would sample on y.
+
+==============================================================================
+BRANCH EVALUATION — original rules vs amended rules
+==============================================================================
+branch      original    amended       reason for the change
+DATA        False       False         candidate screened for label derivation; coverage now computed, not NaN
+EMBEDDING   True        False         probe fit on train, scored on test, patient level
+MODEL       True        False         OR -> AND: flip rate alone is activity, not discrimination
+
+original verdict : EMBEDDING_AND_MODEL   (Phase 6 reported EMBEDDING_AND_MODEL)
+amended verdict  : NO_SINGLE_ROOT_CAUSE
+
+wrote /kaggle/working/phase6b/phase6b_root_cause_verdict.json
+# ---------------------------------------------------------------------------
+# E2. The corrected conclusion paragraph, with this run's numbers substituted.
+# ---------------------------------------------------------------------------
+stage_txt = {
+    "CEILING_IS_PRETRAINED_REPRESENTATION":
+        "the ceiling is already present in the pretrained encoder",
+    "PROJECTION_LOSES_SIGNAL":
+        "the 256-d projection head discards usable signal",
+    "TRAINING_ADDS_LITTLE":
+        "episodic and auxiliary training add little to the encoder",
+    "PROTOTYPE_STAGE_ADDS_LITTLE":
+        "the prototype stage adds little beyond the representation",
+}
+located = "; ".join(stage_txt[f] for f in flags if f in stage_txt) or \
+          "no single stage dominates at the pre-set thresholds"
+
+conclusion = f'''CORRECTED CONCLUSION — TC-WPN Phase 6/6B
+
+The dominant limitation appears to be the quality and separability of the learned
+clinical representation, while the TC-WPN weighting mechanism is active but
+contributes very little to aggregate discrimination, and the data-error analysis
+does not identify a strongly clustered error stratum.
+
+Located to a stage (Phase 6B, patient level, probes fit on train and scored once
+on test): {located}.
+
+  S0 pretrained Bio_ClinicalBERT 768   {s0:.4f}
+  S1 fine-tuned encoder pooled 768     {s1:.4f}   ({s1-s0:+.4f} vs S0)
+  S2 fine-tuned projection 256         {s2:.4f}   ({s2-s1:+.4f} vs S1)
+  S3 full TC-WPN episodic              {s3:.4f}   ({s3-s2:+.4f} vs S2)
+
+Weighting: active (H_norm 0.945, max/min 20.4, corr(w, days) -0.794) but worth
+delta AUROC = +0.0009 against its own uniform-weight counterfactual, on the same
+model, embeddings, episodes and support sets. It changes {FLIP_ERR:.2%} of already-
+wrong decisions without changing discrimination.
+
+Data: k-NN error clustering enrichment {ERROR_CLUSTERING:.2f}x against a 1.5x floor;
+no strongly isolated error stratum. The single Phase 6 candidate,
+anx_coded_this_adm, is {'a projection of the ICD-derived label and was removed' if LABEL_DERIVED else 'retained after screening'}.
+
+Error geometry: FP are boundary-like ambiguous controls (median |centroid score|
+0.0324 vs 0.0852 for TN); FN are atypical anxiety representations (99.29% sit
+closer to the control prototype; own-centroid cosine 0.9026 vs 0.9666 for TP).
+
+Operating point: at the validation-locked threshold 0.26931 the model runs at
+sensitivity 0.9217 and specificity 0.2854. That is a screening operating point and
+must be reported as such, not summarised as "about 70% accuracy".
+
+NOT DEMONSTRATED, and not to be written:
+  - "ClinicalBERT is the root cause"  (only true if S0 is both low AND close to S3)
+  - "512-token truncation causes the 0.7379"  (errors are LESS likely to hide
+     anxiety terms past the window)
+  - "the weighting is a root cause"  (+0.0009)
+  - "the anx_coded_this_adm stratum is not underrepresented in training"
+     (Phase 6 could not compute it; Phase 6B finds underrepresented={UNDERREP})
+'''
+(OUT / "phase6b_conclusion.txt").write_text(conclusion)
+print(conclusion)
+CORRECTED CONCLUSION — TC-WPN Phase 6/6B
+
+The dominant limitation appears to be the quality and separability of the learned
+clinical representation, while the TC-WPN weighting mechanism is active but
+contributes very little to aggregate discrimination, and the data-error analysis
+does not identify a strongly clustered error stratum.
+
+Located to a stage (Phase 6B, patient level, probes fit on train and scored once
+on test): the prototype stage adds little beyond the representation.
+
+  S0 pretrained Bio_ClinicalBERT 768   0.6307
+  S1 fine-tuned encoder pooled 768     0.7688   (+0.1381 vs S0)
+  S2 fine-tuned projection 256         0.7611   (-0.0077 vs S1)
+  S3 full TC-WPN episodic              0.7379   (-0.0232 vs S2)
+
+Weighting: active (H_norm 0.945, max/min 20.4, corr(w, days) -0.794) but worth
+delta AUROC = +0.0009 against its own uniform-weight counterfactual, on the same
+model, embeddings, episodes and support sets. It changes 6.24% of already-
+wrong decisions without changing discrimination.
+
+Data: k-NN error clustering enrichment 1.16x against a 1.5x floor;
+no strongly isolated error stratum. The single Phase 6 candidate,
+anx_coded_this_adm, is a projection of the ICD-derived label and was removed.
+
+Error geometry: FP are boundary-like ambiguous controls (median |centroid score|
+0.0324 vs 0.0852 for TN); FN are atypical anxiety representations (99.29% sit
+closer to the control prototype; own-centroid cosine 0.9026 vs 0.9666 for TP).
+
+Operating point: at the validation-locked threshold 0.26931 the model runs at
+sensitivity 0.9217 and specificity 0.2854. That is a screening operating point and
+must be reported as such, not summarised as "about 70% accuracy".
+
+NOT DEMONSTRATED, and not to be written:
+  - "ClinicalBERT is the root cause"  (only true if S0 is both low AND close to S3)
+  - "512-token truncation causes the 0.7379"  (errors are LESS likely to hide
+     anxiety terms past the window)
+  - "the weighting is a root cause"  (+0.0009)
+  - "the anx_coded_this_adm stratum is not underrepresented in training"
+     (Phase 6 could not compute it; Phase 6B finds underrepresented=False)
+
+Part F — the one next experiment
+The instruction being followed here:
+
+"Do not immediately change ClinicalBERT, pooling, temperature, distance, consistency passes, recency decay, support composition. You have evidence that the representation is limited, but you haven't isolated which representation component is responsible."
+
+and, after 6B:
+
+"I would choose one intervention—most likely the 512-token/multi-chunk representation experiment if the provenance checks support it—and run it across the same five seeds."
+
+The cell below does not retrain. It writes a pre-registration whose content is conditional on what Parts A–D actually found, so the choice is made by the diagnosis rather than by preference. max_chunks 1 → 4 is selected only if Part D's upper bound justifies it; otherwise the honest outcome is that no intervention is warranted and the negative result stands.
+
+The comparator remains the frozen five-seed benchmark — tcwpn_full 0.7377 ± 0.0031, aux_only 0.7371 ± 0.0081, whose seed range 0.7233–0.7432 spans 0.0199. Any effect smaller than that spread is noise.
+
+# ---------------------------------------------------------------------------
+# F1. Pre-registration, generated from the diagnosis. Nothing is trained.
+# ---------------------------------------------------------------------------
+SEED_SPREAD, MDE = 0.0199, 0.02
+bound_frac = npat_gain_err / max(len(err_pat), 1)
+
+if "PROJECTION_LOSES_SIGNAL" in flags:
+    choice = "PROJECTION"
+    change = ("Change ONLY the projection stage (its width, or removing it so prototypes are\n"
+              "  built in the 768-d pooled space). The encoder, pooling, weighting, optimiser\n"
+              "  and data pipeline stay identical.")
+    why = f"S2 - S1 = {s2-s1:+.4f}: the projection head loses signal the encoder had."
+elif bound_frac >= 0.10:
+    choice = "MAX_CHUNKS"
+    change = ("Change ONLY max_chunks 1 -> 4 in tokenize_cohort.py. Same cohort, same patient\n"
+              "  split, same labels, same five seeds, same K, same architecture, same training\n"
+              "  settings. NOTE: the pkl changes, so the store fingerprint changes and the\n"
+              "  episode plans MUST be rebuilt -- which means the frozen baseline has to be\n"
+              "  re-scored on the new plans for the paired test to remain valid.")
+    why = (f"Part D: {npat_gain_err:,} currently-misclassified patients ({bound_frac:.1%} of all "
+           f"errors) have anxiety terminology only beyond the 512-token window.")
+elif "CEILING_IS_PRETRAINED_REPRESENTATION" in flags:
+    choice = "NONE_ENCODER_SATURATED"
+    change = ("NONE of the TC-WPN components. S0 already reaches S3, so head-level and\n"
+              "  prototype-level changes cannot move the result. If anything is tried it must\n"
+              "  be a different clinical encoder -- a representation swap, not a TC-WPN tweak.")
+    why = f"S0 {s0:.4f} vs S3 {s3:.4f}: the pretrained representation is already the ceiling."
+else:
+    choice = "NONE"
+    change = ("NONE. No stage was isolated as the binding constraint at the pre-set\n"
+              "  thresholds. Write up the negative result with the Phase 6/6B diagnosis.")
+    why = "No branch was decisively located."
+
+prereg = f'''# TC-WPN Phase 6B -> next experiment (pre-registration)
+
+run under investigation : {RUN_NAME}
+frozen test AUROC       : {AUROC_TEST:.4f}  (2,278 patients, threshold {THRESHOLD:.5f})
+amended verdict         : {verdict["verdict_amended"]}
+selected intervention   : {choice}
+
+WHY THIS ONE
+  {why}
+
+THE ONE CHANGE
+  {change}
+
+WHAT STAYS FROZEN
+  cohort, patient splits, labels, seeds 42-46, K={K}, evaluation plans (unless the
+  pipeline itself changes, in which case the baseline is re-scored too),
+  architecture, optimiser, learning rate, dropout, threshold selection procedure.
+
+METRIC AND COMPARATOR
+  Primary   : patient-level AUROC on the frozen episode plans.
+  Comparator: tcwpn_full 0.7377 +/- 0.0031 ; aux_only 0.7371 +/- 0.0081.
+  Secondary : PR-AUC, sensitivity, specificity, Brier, ECE, and the anxiety-blinded
+              arm -- an improvement that vanishes under blinding is lexical, and the
+              blinding gap is already 0.7379 -> 0.6284.
+
+DECISION RULE (fixed now)
+  Seeds     : 42, 43, 44, 45, 46. Selection on VALIDATION only; test scored ONCE.
+  Success   : paired mean delta AUROC >= +{MDE:.3f} AND paired p < 0.05 AND >= 4/5 seeds improved.
+  Failure   : anything else. A delta below the {SEED_SPREAD:.4f} baseline seed spread is noise.
+  Either way, the result is reported.
+
+NOT ALLOWED
+  - more than one change at a time
+  - re-selecting the threshold on test
+  - dropping a disagreeing seed
+  - reporting the best of several attempted interventions
+  - using anx_coded_this_adm to rebalance training data (it is label-derived)
+  - chasing the proposal's 0.80
+'''
+(OUT / "phase6b_next_experiment.md").write_text(prereg)
+print(prereg)
+# TC-WPN Phase 6B -> next experiment (pre-registration)
+
+run under investigation : tcwpn_full_k5_seed42
+frozen test AUROC       : 0.7379  (2,278 patients, threshold 0.26931)
+amended verdict         : NO_SINGLE_ROOT_CAUSE
+selected intervention   : MAX_CHUNKS
+
+WHY THIS ONE
+  Part D: 188 currently-misclassified patients (24.5% of all errors) have anxiety terminology only beyond the 512-token window.
+
+THE ONE CHANGE
+  Change ONLY max_chunks 1 -> 4 in tokenize_cohort.py. Same cohort, same patient
+  split, same labels, same five seeds, same K, same architecture, same training
+  settings. NOTE: the pkl changes, so the store fingerprint changes and the
+  episode plans MUST be rebuilt -- which means the frozen baseline has to be
+  re-scored on the new plans for the paired test to remain valid.
+
+WHAT STAYS FROZEN
+  cohort, patient splits, labels, seeds 42-46, K=5, evaluation plans (unless the
+  pipeline itself changes, in which case the baseline is re-scored too),
+  architecture, optimiser, learning rate, dropout, threshold selection procedure.
+
+METRIC AND COMPARATOR
+  Primary   : patient-level AUROC on the frozen episode plans.
+  Comparator: tcwpn_full 0.7377 +/- 0.0031 ; aux_only 0.7371 +/- 0.0081.
+  Secondary : PR-AUC, sensitivity, specificity, Brier, ECE, and the anxiety-blinded
+              arm -- an improvement that vanishes under blinding is lexical, and the
+              blinding gap is already 0.7379 -> 0.6284.
+
+DECISION RULE (fixed now)
+  Seeds     : 42, 43, 44, 45, 46. Selection on VALIDATION only; test scored ONCE.
+  Success   : paired mean delta AUROC >= +0.020 AND paired p < 0.05 AND >= 4/5 seeds improved.
+  Failure   : anything else. A delta below the 0.0199 baseline seed spread is noise.
+  Either way, the result is reported.
+
+NOT ALLOWED
+  - more than one change at a time
+  - re-selecting the threshold on test
+  - dropping a disagreeing seed
+  - reporting the best of several attempted interventions
+  - using anx_coded_this_adm to rebalance training data (it is label-derived)
+  - chasing the proposal's 0.80
+
+What to take to the supervisor
+The three fixes, and what each changed.
+
+requested	outcome
+Validate anx_coded_this_adm provenance	The NaN was a missing branch in flag_rates, not missing data. Coverage now measured on all splits. The variable is built from the same ICD flag_diagnoses call as the label, so it is a label projection, not a clinical characteristic — removed from the candidate strata and not usable for rebalancing.
+Note contribution analysis for FP/FN	Every note now has its contribution, pull, leave-one-out patient score, and a decisive/dissenting flag. Dissenting notes are counted — that is the size of the error the patient-verdict-per-note shortcut was introducing.
+Isolate 768 → 256 → ProtoNet	Four rungs measured at patient level, probes fit on train and scored once on test. S0 (pretrained) is included, without which "ClinicalBERT is the limitation" cannot be tested at all.
+Verify truncation	truncated_by_512 = 1.0 for both groups makes the flag a constant. The varying quantity is measured instead, and Part D puts an explicit upper bound on what max_chunks 1 → 4 could recover.
+The verdict wording changes. EMBEDDING_AND_MODEL overstated the model component: the weighting is worth +0.0009 AUROC. The MODEL branch fired on a flip-rate clause that measured mechanism activity, not discrimination. Amended rule and original rule are both reported, with the amendment and its justification recorded in phase6b_root_cause_verdict.json — an amendment declared in the open is defensible; a silently edited threshold is not.
+
+On accuracy. Sensitivity 0.9217 with specificity 0.2854 is a screening operating point, and it should be stated that way rather than compressed into "about 70%". The model is far more willing to call someone positive than negative, which is a clinical property that needs justifying, not hiding.
+
+What Phase 6 + 6B legitimately establish, all leakage-controlled and five-seed where relevant: no catastrophic overfitting (gap +0.0579); recency does not explain the errors; errors do not form an isolated cluster (1.16× against a 1.5× floor); FP are boundary-like controls, FN are atypical anxiety representations; explicit anxiety terminology strongly helps (and 0.7379 → 0.6284 blinded says ~46% of the above-chance margin is lexical); the representation carries modest class separation; and the TC-WPN weighting is active but contributes ~0.001 AUROC.
+
+That is a coherent negative result with a mechanism, which is publishable. It is a better paper than an unexplained 0.80.
+
+Files written to /kaggle/working/phase6b/
+file	contents
+phase6b_anx_coded_coverage_notes.csv / _patients.csv	the coverage table Phase 6 returned as NaN
+phase6b_anx_coded_verdict.json	provenance answer, label-derivation test, NaN cause
+phase6b_note_contributions.csv	per-note contribution, pull, LOO score, decisive/dissenting
+phase6b_patient_note_spread.csv	within-patient score spread and threshold straddling
+phase6b_representation_staircase.csv	S0/S1/S2/S3 × centroid/kNN/logreg, patient level
+phase6b_staircase_verdict.json	stage deltas and which flags fired
+phase6b_truncation.csv / _bound.json	unseen content per note, upper bound on Experiment C
+phase6b_root_cause_verdict.json	original vs amended branches, with amendments recorded
+phase6b_conclusion.txt	the corrected paragraph, with this run's numbers
+phase6b_next_experiment.md	the single pre-registered intervention
+Do not modify TC-WPN yet. Run this, read Part C's staircase, then pick the one change

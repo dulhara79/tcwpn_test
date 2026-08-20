@@ -1,0 +1,37 @@
+{
+  "run": "tcwpn_full_k5_seed42",
+  "amendments": [
+    "MODEL branch: OR -> AND. A 6.24% flip rate with delta AUROC +0.0009 is mechanism activity, not a discrimination effect.",
+    "DATA branch: anx_coded_this_adm screened for label derivation before being treated as a stratum; train/val coverage computed properly (Phase 6's NaN was a missing branch in flag_rates, not missing data).",
+    "EMBEDDING branch: probe now fit on train and scored on test at patient level, and split across S0/S1/S2 so the limiting stage is identified."
+  ],
+  "evidence": {
+    "model_auroc_test": 0.7379,
+    "S0_pretrained_768": 0.6307,
+    "S1_finetuned_768": 0.7688,
+    "S2_projection_256": 0.7611,
+    "S3_tcwpn": 0.7379,
+    "staircase_flags": [
+      "PROTOTYPE_STAGE_ADDS_LITTLE"
+    ],
+    "auroc_weighted_minus_uniform": 0.0009,
+    "decision_flip_rate_errors": 0.0624,
+    "knn_error_clustering_enrichment": 1.1637,
+    "anx_coded_label_derived": true,
+    "anx_coded_underrepresented_in_train": false,
+    "dissenting_note_rate": 0.0179,
+    "truncation_upper_bound_patients_wrong": 188
+  },
+  "branches_original": {
+    "DATA": false,
+    "EMBEDDING": true,
+    "MODEL": true
+  },
+  "branches_amended": {
+    "DATA": false,
+    "EMBEDDING": false,
+    "MODEL": false
+  },
+  "verdict_original": "EMBEDDING_AND_MODEL",
+  "verdict_amended": "NO_SINGLE_ROOT_CAUSE"
+}

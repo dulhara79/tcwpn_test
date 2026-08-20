@@ -1,0 +1,7 @@
+{
+  "p_coded_given_control_max": 0.0,
+  "p_coded_given_case_mean": 0.5311681025025645,
+  "label_derived": true,
+  "underrepresented_in_train": false,
+  "phase6_nan_cause": "flag_rates() had no branch for this column; it fell through to else: np.nan"
+}

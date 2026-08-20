@@ -1,0 +1,39 @@
+CORRECTED CONCLUSION — TC-WPN Phase 6/6B
+
+The dominant limitation appears to be the quality and separability of the learned
+clinical representation, while the TC-WPN weighting mechanism is active but
+contributes very little to aggregate discrimination, and the data-error analysis
+does not identify a strongly clustered error stratum.
+
+Located to a stage (Phase 6B, patient level, probes fit on train and scored once
+on test): the prototype stage adds little beyond the representation.
+
+  S0 pretrained Bio_ClinicalBERT 768   0.6307
+  S1 fine-tuned encoder pooled 768     0.7688   (+0.1381 vs S0)
+  S2 fine-tuned projection 256         0.7611   (-0.0077 vs S1)
+  S3 full TC-WPN episodic              0.7379   (-0.0232 vs S2)
+
+Weighting: active (H_norm 0.945, max/min 20.4, corr(w, days) -0.794) but worth
+delta AUROC = +0.0009 against its own uniform-weight counterfactual, on the same
+model, embeddings, episodes and support sets. It changes 6.24% of already-
+wrong decisions without changing discrimination.
+
+Data: k-NN error clustering enrichment 1.16x against a 1.5x floor;
+no strongly isolated error stratum. The single Phase 6 candidate,
+anx_coded_this_adm, is a projection of the ICD-derived label and was removed.
+
+Error geometry: FP are boundary-like ambiguous controls (median |centroid score|
+0.0324 vs 0.0852 for TN); FN are atypical anxiety representations (99.29% sit
+closer to the control prototype; own-centroid cosine 0.9026 vs 0.9666 for TP).
+
+Operating point: at the validation-locked threshold 0.26931 the model runs at
+sensitivity 0.9217 and specificity 0.2854. That is a screening operating point and
+must be reported as such, not summarised as "about 70% accuracy".
+
+NOT DEMONSTRATED, and not to be written:
+  - "ClinicalBERT is the root cause"  (only true if S0 is both low AND close to S3)
+  - "512-token truncation causes the 0.7379"  (errors are LESS likely to hide
+     anxiety terms past the window)
+  - "the weighting is a root cause"  (+0.0009)
+  - "the anx_coded_this_adm stratum is not underrepresented in training"
+     (Phase 6 could not compute it; Phase 6B finds underrepresented=False)
