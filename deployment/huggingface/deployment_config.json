@@ -1,23 +1,21 @@
 {
   "_comment": [
-    "deployment_config.json — the single versioned unit required by §3 and §17.",
+    "deployment_config.json \u00e2\u20ac\u201d the single versioned unit required by \u00c2\u00a73 and \u00c2\u00a717.",
     "",
-    "§3 states that TC-WPN source code + checkpoint + tokenizer + inference",
+    "\u00c2\u00a73 states that TC-WPN source code + checkpoint + tokenizer + inference",
     "preprocessing must be treated as ONE versioned unit. This file IS that unit.",
     "app.py refuses to start if the loaded checkpoint disagrees with any value",
-    "below (§15.6).",
+    "below (\u00c2\u00a715.6).",
     "",
     "EVERY FIELD MARKED <FILL> MUST BE COMPLETED IN PHASE 1/2 BEFORE DEPLOYMENT.",
     "Nothing here may be guessed. If a value is not known, the deployment is not",
-    "ready — that is the point of the file."
+    "ready \u00e2\u20ac\u201d that is the point of the file."
   ],
-
   "deployment_config_version": "1.0.0",
-
   "provenance": {
-    "_comment": "§17 — the reproducible chain, every step traceable.",
-    "tcwpn_git_commit": "<FILL: commit of dulhara79/tcwpn_test used for Phase 1 freeze>",
-    "tcwpn_git_commit_verified_at": "<FILL: ISO-8601>",
+    "_comment": "\u00c2\u00a717 \u00e2\u20ac\u201d the reproducible chain, every step traceable.",
+    "tcwpn_git_commit": "36d74139069bd3ef99f5289425a63d9d9f3366d3",
+    "tcwpn_git_commit_verified_at": "2026-08-22T10:51:49Z",
     "training_config": "configs/tcwpn_full.yaml",
     "training_command": "python scripts/train.py --config configs/tcwpn_full.yaml --k 5 --seed 42 --stem psych_mimic4idx",
     "run_name": "tcwpn_full_k5_seed42",
@@ -28,14 +26,11 @@
     "hf_space": "dulharakaushalya/tc-wpn-demo",
     "hf_space_commit": "<FILL: set from SPACE_COMMIT at runtime; recorded here at release>"
   },
-
-  "model_version": "<FILL: tcwpn-clean-benchmark-<7-char tcwpn_git_commit>>",
-
+  "model_version": "tcwpn-clean-benchmark-36d7413",
   "preprocessing_version": "bioclinicalbert-maxlen512-maxchunks1-stride128-v1",
-
   "preprocessing": {
     "_comment": [
-      "§15.3 — preprocessing is part of the model. These values MUST equal the",
+      "\u00c2\u00a715.3 \u00e2\u20ac\u201d preprocessing is part of the model. These values MUST equal the",
       "arguments passed to scripts/tokenize_cohort.py for the run named above.",
       "The repo defaults are --max-len 512 --max-chunks 1 --stride 128, and the",
       "frozen five-seed benchmark used max_chunks=1."
@@ -47,10 +42,9 @@
     "padding": "max_length",
     "truncation": true
   },
-
   "inference_configuration": {
     "_comment": [
-      "§15.4. Left-hand names are the supervisor's; the bracketed name is the",
+      "\u00c2\u00a715.4. Left-hand names are the supervisor's; the bracketed name is the",
       "actual PrototypicalModel keyword in src/tcwpn/model.py, which is what the",
       "checkpoint's cfg block records. Values are read from configs/tcwpn_full.yaml."
     ],
@@ -69,10 +63,9 @@
       "aux_weight": "aux_head_weight"
     }
   },
-
   "operating_point": {
     "_comment": [
-      "§7 — these are two DIFFERENT things and must not be conflated.",
+      "\u00c2\u00a77 \u00e2\u20ac\u201d these are two DIFFERENT things and must not be conflated.",
       "AUROC is a threshold-free discrimination metric.",
       "The threshold is an operating point selected on validation (threshold_objective: f1).",
       "scripts/train.py writes locked_threshold into the run manifest; copy it here."
@@ -81,14 +74,13 @@
     "threshold_source": "locked on the full validation plan, objective=f1, never re-tuned on test",
     "threshold_is_derived_from_auroc": false
   },
-
   "research_metrics": {
     "_comment": [
-      "§15.7 — these are served ONLY from /health. They never appear in a",
+      "\u00c2\u00a715.7 \u00e2\u20ac\u201d these are served ONLY from /health. They never appear in a",
       "/predict response.",
-      "§17 — a metric may only be published here if it was measured on the",
+      "\u00c2\u00a717 \u00e2\u20ac\u201d a metric may only be published here if it was measured on the",
       "checkpoint named in `provenance`. Values below are the five-seed frozen",
-      "benchmark from data/TC-WPN — Phase 3B .../tcwpn_full_seed_results.csv and",
+      "benchmark from data/TC-WPN \u00e2\u20ac\u201d Phase 3B .../tcwpn_full_seed_results.csv and",
       "the seed-42 eval_test.json in the same repo. Confirm they correspond to",
       "the checkpoint you actually upload before setting metrics_verified true."
     ],
@@ -96,9 +88,18 @@
     "discrimination": {
       "auroc_mean_5_seeds": 0.7377,
       "auroc_sd_5_seeds": 0.0031,
-      "seeds": [42, 43, 44, 45, 46],
+      "seeds": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ],
       "seed42_auroc": 0.7379,
-      "seed42_auroc_ci95": [0.7184, 0.7582],
+      "seed42_auroc_ci95": [
+        0.7184,
+        0.7582
+      ],
       "seed42_pr_auc": 0.7923
     },
     "at_locked_threshold": {
@@ -107,16 +108,15 @@
       "specificity": 0.2854
     },
     "calibration": {
-      "brier": 0.2090,
+      "brier": 0.209,
       "ece": 0.0849,
       "calibrator_fitted": false
     },
     "evaluation_context": "MIMIC-IV, patient-disjoint episodes, index-time protocol, K=5, concurrent detection, prevalence 0.594",
     "caveat": "Research metric. Not validated on NHSL data. Not a prospective claim."
   },
-
   "api": {
-    "_comment": "§11 — the contract the central backend codes against.",
+    "_comment": "\u00c2\u00a711 \u00e2\u20ac\u201d the contract the central backend codes against.",
     "contract_version": "1.0.0",
     "requires_support_set": true,
     "min_anxiety_support": 1,
@@ -124,9 +124,8 @@
     "allow_default_support_set_in_api": false,
     "allow_default_support_set_in_demo_ui": true
   },
-
   "scope": {
-    "_comment": "§12 — this service answers one question only.",
+    "_comment": "\u00c2\u00a712 \u00e2\u20ac\u201d this service answers one question only.",
     "answers": "Given this note text and this support set, what does TC-WPN predict?",
     "does_not_answer": "What is the final multimodal anxiety risk?",
     "fusion_performed_here": false
