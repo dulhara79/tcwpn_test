@@ -19,12 +19,12 @@
     "training_config": "configs/tcwpn_full.yaml",
     "training_command": "python scripts/train.py --config configs/tcwpn_full.yaml --k 5 --seed 42 --stem psych_mimic4idx",
     "run_name": "tcwpn_full_k5_seed42",
-    "checkpoint_filename": "<FILL: e.g. tcwpn_clean_v1_full_k5_seed42.pt>",
-    "checkpoint_sha256": "<FILL: sha256 of the .pt actually uploaded>",
+    "checkpoint_filename": "tcwpn_clean_v1_full_k5_seed42.pt",
+    "checkpoint_sha256": "aab9641145b22942dae86353a215576a4f659aaabf2cd8d0574daf1f6d8a20f5",
     "hf_model_repo": "dulharakaushalya/tc-wpn-clinical",
-    "hf_model_repo_revision": "<FILL: commit sha in the HF model repo>",
+    "hf_model_repo_revision": "892dab55932a7fe12c42691a2381c9b92d7086da",
     "hf_space": "dulharakaushalya/tc-wpn-demo",
-    "hf_space_commit": "<FILL: set from SPACE_COMMIT at runtime; recorded here at release>"
+    "hf_space_commit": "e8e58db5fd8d16090f833b556ae197cc8703af22"
   },
   "model_version": "tcwpn-clean-benchmark-36d7413",
   "preprocessing_version": "bioclinicalbert-maxlen512-maxchunks1-stride128-v1",
@@ -70,7 +70,7 @@
       "The threshold is an operating point selected on validation (threshold_objective: f1).",
       "scripts/train.py writes locked_threshold into the run manifest; copy it here."
     ],
-    "threshold": "<FILL: locked_threshold from the run manifest, NOT copied from the old Space>",
+    "threshold": "0.2693",
     "threshold_source": "locked on the full validation plan, objective=f1, never re-tuned on test",
     "threshold_is_derived_from_auroc": false
   },
