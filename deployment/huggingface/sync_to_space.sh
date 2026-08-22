@@ -50,12 +50,44 @@ if ! diff -q "${REPO_ROOT}/src/tcwpn/model.py" "${SRC}/tc_wpn/model.py" >/dev/nu
 fi
 
 # Phase 1/2 must have completed: no placeholders may reach the Space.
-if grep -q '"<FILL' "${SRC}/deployment_config.json"; then
-  echo "ERROR: deployment_config.json still has <FILL> placeholders." >&2
-  echo "       Complete Phase 2 and Phase 4 first — app.py will not start." >&2
-  grep -n '<FILL' "${SRC}/deployment_config.json" >&2
-  exit 1
-fi
+# Check the SAME fields app.py::_verify_config_complete checks — no more, no
+# less. Fields that can only be known after the push (hf_space_commit) or that
+# are release-time decisions (metrics_verified) warn instead of blocking.
+python3 - "${SRC}/deployment_config.json" <<'PY' || exit 1
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+prov, op = cfg["provenance"], cfg["operating_point"]
+
+def unfilled(v):
+    return isinstance(v, str) and v.strip().startswith("<FILL")
+
+blocking = {
+    "provenance.tcwpn_git_commit":     prov.get("tcwpn_git_commit"),
+    "provenance.checkpoint_filename":  prov.get("checkpoint_filename"),
+    "provenance.checkpoint_sha256":    prov.get("checkpoint_sha256"),
+    "model_version":                   cfg.get("model_version"),
+    "operating_point.threshold":       op.get("threshold"),
+}
+advisory = {
+    "provenance.hf_model_repo_revision": prov.get("hf_model_repo_revision"),
+    "research_metrics.metrics_verified": cfg["research_metrics"].get("metrics_verified"),
+}
+
+bad = [k for k, v in blocking.items() if unfilled(v) or v in (None, "")]
+if bad:
+    print("ERROR: deployment_config.json is incomplete. app.py will not start.",
+          file=sys.stderr)
+    for k in bad:
+        print(f"       - {k}", file=sys.stderr)
+    print("       Run scripts/export_checkpoint.py (Phase 4) to fill these.",
+          file=sys.stderr)
+    sys.exit(1)
+
+for k, v in advisory.items():
+    if unfilled(v) or v in (None, "", False):
+        print(f"WARNING: {k} not set. The Space will run, but /health will "
+              f"withhold that part of the provenance chain.")
+PY
 
 echo "Removing the archived architecture from the Space..."
 rm -rf "${SPACE_DIR}/tc_wpn/models"
