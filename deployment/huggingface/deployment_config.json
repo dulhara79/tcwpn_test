@@ -14,8 +14,8 @@
   "deployment_config_version": "1.0.0",
   "provenance": {
     "_comment": "\u00c2\u00a717 \u00e2\u20ac\u201d the reproducible chain, every step traceable.",
-    "tcwpn_git_commit": "36d74139069bd3ef99f5289425a63d9d9f3366d3",
-    "tcwpn_git_commit_verified_at": "2026-08-22T10:51:49Z",
+    "tcwpn_git_commit": "d5277314891077840316789e8eab55b23fd8c6e1",
+    "tcwpn_git_commit_verified_at": "2026-08-22T11:00:38Z",
     "training_config": "configs/tcwpn_full.yaml",
     "training_command": "python scripts/train.py --config configs/tcwpn_full.yaml --k 5 --seed 42 --stem psych_mimic4idx",
     "run_name": "tcwpn_full_k5_seed42",
